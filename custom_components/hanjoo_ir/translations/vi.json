@@ -1,0 +1,14 @@
+{
+  "title": "HanJoo IR Manager",
+  "config": {
+    "step": {
+      "user": {
+        "title": "HanJoo IR Manager",
+        "description": "Tạo trình quản lý trung tâm cho thiết bị hồng ngoại, profile, học lệnh và tự động hóa. Một mục HanJoo IR sẽ xuất hiện ở thanh bên."
+      }
+    },
+    "abort": {
+      "already_configured": "HanJoo IR Manager đã được cài đặt."
+    }
+  }
+}

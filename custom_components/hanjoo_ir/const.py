@@ -3,13 +3,22 @@ from __future__ import annotations
 
 DOMAIN = "hanjoo_ir"
 NAME = "HanJoo IR Manager"
-VERSION = "0.5.4"
+VERSION = "0.5.5"
 AUTHOR_NAME = "HanJoo"
 AUTHOR_FACEBOOK = "Kim Han Yuu"
 AUTHOR_EMAIL = "kimhanzoo@gmail.com"
 
 CORE_API_VERSION = 1
-CORE_BASE_URL = "http://local-hanjoo-ir-core:8099"
+# Home Assistant Supervisor names add-ons installed from a GitHub repository as
+# {repository_hash}_{slug}. The repository hash for
+# https://github.com/kimhanzoo/HanJoo_IR_Addon is 83a35d78 (SHA-1, first 8
+# characters). DNS hostnames replace underscores with hyphens.
+# Keep the local development hostname as a fallback.
+CORE_BASE_URLS = (
+    "http://83a35d78-hanjoo-ir-core:8099",
+    "http://local-hanjoo-ir-core:8099",
+)
+CORE_BASE_URL = CORE_BASE_URLS[0]
 CORE_REQUEST_TIMEOUT = 3.0
 
 PANEL_TITLE = "HanJoo IR"

@@ -7,6 +7,7 @@ can safely remain visible inside a Home Assistant custom integration.
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any
 from urllib.parse import quote
 
@@ -46,6 +47,81 @@ class HanJooCoreClient:
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
         self.base_url = CORE_BASE_URL.rstrip("/")
+        self._resolved_base_url: str | None = None
+
+    async def _supervisor_core_base_url(self) -> str | None:
+        """Resolve the add-on hostname from Supervisor instead of assuming local-* DNS.
+
+        Repository-installed add-ons receive a Supervisor-generated slug/hostname
+        (for example ``<repo>_hanjoo_ir_core``), while a local add-on normally uses
+        ``local_hanjoo_ir_core``.  Hard-coding one form makes the other form
+        unreachable even though the container itself is healthy.
+        """
+        token = os.environ.get("SUPERVISOR_TOKEN")
+        if not token:
+            return None
+        session = async_get_clientsession(self.hass)
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            async with asyncio.timeout(3.0):
+                async with session.get("http://supervisor/addons", headers=headers) as response:
+                    payload = await response.json(content_type=None)
+                    if response.status >= 400 or not isinstance(payload, dict):
+                        return None
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            addons = data.get("addons") if isinstance(data, dict) else None
+            if not isinstance(addons, list):
+                return None
+
+            addon_slug = None
+            for addon in addons:
+                if not isinstance(addon, dict):
+                    continue
+                slug = str(addon.get("slug") or addon.get("addon") or "").strip()
+                name = str(addon.get("name") or "").strip().lower()
+                normalized = slug.lower().replace("-", "_")
+                if normalized.endswith("hanjoo_ir_core") or name == "hanjoo ir core":
+                    addon_slug = slug
+                    break
+            if not addon_slug:
+                return None
+
+            hostname = addon_slug
+            try:
+                async with asyncio.timeout(3.0):
+                    async with session.get(
+                        f"http://supervisor/addons/{quote(addon_slug, safe='')}/info",
+                        headers=headers,
+                    ) as response:
+                        info_payload = await response.json(content_type=None)
+                        if response.status < 400 and isinstance(info_payload, dict):
+                            info = info_payload.get("data")
+                            if isinstance(info, dict):
+                                hostname = str(info.get("hostname") or hostname).strip() or hostname
+            except (TimeoutError, OSError, ValueError):
+                # The add-on slug itself is a valid internal DNS name on Supervisor
+                # installations, so info lookup failure is not fatal.
+                pass
+            return f"http://{hostname}:8099"
+        except (TimeoutError, OSError, ValueError):
+            return None
+
+    async def _candidate_base_urls(self) -> list[str]:
+        urls: list[str] = []
+        if self._resolved_base_url:
+            urls.append(self._resolved_base_url.rstrip("/"))
+        supervisor_url = await self._supervisor_core_base_url()
+        if supervisor_url:
+            urls.append(supervisor_url.rstrip("/"))
+        # Compatibility fallbacks for local/manual installs and older packages.
+        urls.extend([
+            self.base_url.rstrip("/"),
+            "http://local_hanjoo_ir_core:8099",
+            "http://local-hanjoo-ir-core:8099",
+            "http://hanjoo_ir_core:8099",
+            "http://hanjoo-ir-core:8099",
+        ])
+        return list(dict.fromkeys(urls))
 
     async def _json(
         self,
@@ -56,22 +132,35 @@ class HanJooCoreClient:
         timeout: float | None = None,
     ) -> Any:
         session = async_get_clientsession(self.hass)
-        url = f"{self.base_url}{path}"
-        try:
-            async with asyncio.timeout(timeout or CORE_REQUEST_TIMEOUT):
-                async with session.request(method, url, json=payload) as response:
-                    data = await response.json(content_type=None)
-                    if response.status >= 400:
-                        message = data.get("error") if isinstance(data, dict) else str(data)
-                        raise HanJooCoreError(f"HanJoo IR Core error {response.status}: {message}")
-                    return data
-        except HanJooCoreError:
-            raise
-        except (TimeoutError, OSError, ValueError) as err:
-            raise HanJooCoreError(
-                "Cannot connect to HanJoo IR Core add-on. "
-                "Check that the add-on is installed, running, and healthy."
-            ) from err
+        last_error: Exception | None = None
+        for base_url in await self._candidate_base_urls():
+            url = f"{base_url}{path}"
+            try:
+                async with asyncio.timeout(timeout or CORE_REQUEST_TIMEOUT):
+                    async with session.request(method, url, json=payload) as response:
+                        data = await response.json(content_type=None)
+                        if response.status >= 400:
+                            message = data.get("error") if isinstance(data, dict) else str(data)
+                            raise HanJooCoreError(f"HanJoo IR Core error {response.status}: {message}")
+                        self._resolved_base_url = base_url
+                        return data
+            except HanJooCoreError:
+                raise
+            except (TimeoutError, OSError, ValueError) as err:
+                last_error = err
+                continue
+        raise HanJooCoreError(
+            "Cannot connect to HanJoo IR Core add-on. "
+            "Supervisor could not resolve/reach the Core service on port 8099. "
+            f"Last transport error: {last_error}"
+        ) from last_error
+
+    async def _active_host(self) -> str:
+        if not self._resolved_base_url:
+            # /health also validates the API and caches the working base URL.
+            await self.health()
+        base = (self._resolved_base_url or self.base_url).split("://", 1)[-1]
+        return base.split(":", 1)[0]
 
     async def health(self) -> dict[str, Any]:
         data = await self._json("GET", "/health")
@@ -87,7 +176,7 @@ class HanJooCoreClient:
         """Probe every protocol registered by the public codec sidecar."""
         session = async_get_clientsession(self.hass)
         # Same add-on hostname, dedicated internal sidecar port.
-        host = self.base_url.split("://", 1)[-1].split(":", 1)[0]
+        host = await self._active_host()
         url = f"http://{host}:8101/v1/probe"
         try:
             async with asyncio.timeout(8.0):
@@ -111,7 +200,7 @@ class HanJooCoreClient:
 
     async def probe_all(self, timings: list[int]) -> dict[str, Any]:
         session = async_get_clientsession(self.hass)
-        host = self.base_url.split("://", 1)[-1].split(":", 1)[0]
+        host = await self._active_host()
         try:
             async with asyncio.timeout(10.0):
                 async with session.post(f"http://{host}:8101/v1/probe-all", json={"timings": _codec_timings(timings)}) as response:
@@ -126,7 +215,7 @@ class HanJooCoreClient:
 
     async def probe_health(self) -> dict[str, Any]:
         session = async_get_clientsession(self.hass)
-        host = self.base_url.split("://", 1)[-1].split(":", 1)[0]
+        host = await self._active_host()
         try:
             async with asyncio.timeout(4.0):
                 async with session.get(f"http://{host}:8101/health") as response:

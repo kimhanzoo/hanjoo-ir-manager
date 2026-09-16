@@ -7,6 +7,7 @@ from copy import deepcopy
 import re
 import unicodedata
 from typing import Any, Callable
+from types import SimpleNamespace
 import uuid
 
 from homeassistant.components.infrared import (
@@ -729,11 +730,11 @@ class HanJooIRManager:
                 "Hãy học lại.",
             )
 
-        if len(timings) < 10:
+        if len(timings) < 20:
             return (
                 "warning",
-                "Frame khá ngắn. Có thể hợp lệ với một số giao thức, "
-                "nhưng nên Test sau khi lưu.",
+                "Frame khá ngắn hoặc có thể chỉ là một burst phụ của lệnh nhiều frame. "
+                "HanJoo sẽ chờ gom các burst liên tiếp trước khi kết luận.",
             )
 
         return ("good", None)
@@ -784,6 +785,7 @@ class HanJooIRManager:
             "frequency": int(code.get("frequency") or DEFAULT_FREQUENCY),
             "timings": timings,
             "timing_count": len(timings),
+            "frame_count": int(getattr(signal, "frame_count", 1) or 1),
             "protocol_hints": protocol_hints,
             "duration_ms": round(total_us / 1000, 2),
             "preview": timings[:24],
@@ -825,6 +827,7 @@ class HanJooIRManager:
             "token": token,
             "frequency": int(code.get("frequency") or DEFAULT_FREQUENCY),
             "timing_count": len(timings),
+            "frame_count": int(getattr(signal, "frame_count", 1) or 1),
             "duration_ms": round(total_us / 1000, 2),
             "preview": timings[:24],
             "truncated": len(timings) > 24,
@@ -955,27 +958,82 @@ class HanJooIRManager:
 
     async def _capture_signal(
         self, device: dict[str, Any], timeout: int
-    ) -> InfraredReceivedSignal:
+    ) -> Any:
+        """Capture one *physical button press*, not merely one receiver event.
+
+        Some A/C remotes (notably several Daikin families) transmit one command
+        as multiple bursts/frames separated by short gaps. Home Assistant may
+        publish those bursts as separate InfraredReceivedSignal events. The old
+        one-shot capture returned after the first event, so the automatic wizard
+        immediately armed the next step and accidentally consumed the remaining
+        bursts as 25 C / 26 C / OFF samples.
+
+        We now keep the receiver armed until it has been quiet for a short guard
+        interval. Every event belonging to that press is concatenated, preserving
+        the inter-frame space, and returned as one logical sample. Holding a key
+        keeps extending the quiet timer, so the next wizard step cannot steal a
+        repeat from the same press.
+        """
         receiver = device.get("receiver_entity_id")
         if not receiver:
             raise HomeAssistantError("Thiết bị chưa chọn IR Receiver")
         timeout = max(2, min(int(timeout), 120))
+        quiet_window = 0.45
+
         async with self._learn_lock:
             loop = asyncio.get_running_loop()
-            future: asyncio.Future[InfraredReceivedSignal] = loop.create_future()
+            future: asyncio.Future[Any] = loop.create_future()
             device_id = str(device.get("id") or "")
             if device_id:
                 self._active_capture_futures[device_id] = future
 
-            # Reserve this receiver for Learn before subscribing the one-shot
-            # capture callback. Background remote synchronization remains
-            # subscribed but ignores frames from this receiver until release.
             self._learning_receivers.add(str(receiver))
+            frames: list[list[int]] = []
+            modulations: list[int] = []
+            quiet_handle: asyncio.TimerHandle | None = None
+
+            def finish_press() -> None:
+                nonlocal quiet_handle
+                quiet_handle = None
+                if future.done() or not frames:
+                    return
+                merged: list[int] = []
+                for frame in frames:
+                    if not frame:
+                        continue
+                    # Each HA receiver event starts with a mark. If the previous
+                    # event ended without an explicit space, insert a conservative
+                    # inter-frame idle gap instead of creating two adjacent marks.
+                    if merged and merged[-1] > 0 and frame[0] > 0:
+                        merged.append(-10_000)
+                    merged.extend(frame)
+                modulation = modulations[0] if modulations else DEFAULT_FREQUENCY
+                future.set_result(
+                    SimpleNamespace(
+                        timings=merged,
+                        modulation=modulation,
+                        frame_count=len(frames),
+                    )
+                )
 
             @callback
             def got_signal(signal: InfraredReceivedSignal) -> None:
-                if not future.done():
-                    future.set_result(signal)
+                nonlocal quiet_handle
+                if future.done():
+                    return
+                frame = self._normalize_rx_timings(list(signal.timings))
+                if not frame:
+                    return
+                frames.append(frame)
+                modulation = getattr(signal, "modulation", None)
+                if modulation:
+                    try:
+                        modulations.append(int(modulation))
+                    except (TypeError, ValueError):
+                        pass
+                if quiet_handle is not None:
+                    quiet_handle.cancel()
+                quiet_handle = loop.call_later(quiet_window, finish_press)
 
             try:
                 unsubscribe = async_subscribe_receiver(self.hass, receiver, got_signal)
@@ -985,9 +1043,11 @@ class HanJooIRManager:
                 return await asyncio.wait_for(future, timeout=timeout)
             except TimeoutError as err:
                 raise HomeAssistantError(
-                    f"Hết {timeout} giây nhưng chưa nhận được tín hiệu IR"
+                    f"Hết {timeout} giây nhưng chưa nhận được tín hiệu IR hoàn chỉnh"
                 ) from err
             finally:
+                if quiet_handle is not None:
+                    quiet_handle.cancel()
                 unsubscribe()
                 self._learning_receivers.discard(str(receiver))
                 if device_id and self._active_capture_futures.get(device_id) is future:

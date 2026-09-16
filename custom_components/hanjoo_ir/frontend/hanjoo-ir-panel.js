@@ -1,4 +1,4 @@
-/* HanJoo IR Manager v0.5.6 - dependency-free Home Assistant admin panel */
+/* HanJoo IR Manager v0.5.8 - dependency-free Home Assistant admin panel */
 
 // Home Assistant's native device page currently hard-codes its toolbar back path
 // to /config/devices/dashboard. When a device was opened from HanJoo, intercept
@@ -972,7 +972,7 @@ class HanjooIrPanel extends HTMLElement {
             const active = this._identifyAutoRunning && !cap && !stepError && i === steps.findIndex((_, idx) => !captured.has(idx));
             return `<article class="identify-step ${cap ? "done" : stepError ? "error" : active ? "active" : ""}">
               <div class="identify-step-num">${cap ? "✓" : i + 1}</div>
-              <div class="identify-step-main"><b>${this.esc(step.label)}</b><span>${this.esc(step.help)}</span>${active ? `<small>● ${this.tr("Đang chờ bạn bấm nút này trên remote…", "Waiting for this button on the remote…")}</small>` : ""}${stepError ? `<small class="step-error">⚠ ${this.esc(stepError)}</small>` : ""}${cap ? `<small>✓ ${cap.timing_count} timings · ${cap.duration_ms} ms · ${this.esc(cap.quality)}</small>${this.renderCaptureRecognition(cap)}` : ""}</div>
+              <div class="identify-step-main"><b>${this.esc(step.label)}</b><span>${this.esc(step.help)}</span>${active ? `<small>● ${this.tr("Đang chờ bạn bấm nút này trên remote…", "Waiting for this button on the remote…")}</small>` : ""}${stepError ? `<small class="step-error">⚠ ${this.esc(stepError)}</small>` : ""}${cap ? `<small>✓ ${cap.timing_count} timings · ${cap.frame_count || 1} frame(s) · ${cap.duration_ms} ms · ${this.esc(cap.quality)}</small>${this.renderCaptureRecognition(cap)}` : ""}</div>
               ${(cap || stepError) ? `<button ${this._identifyCapturing ? "disabled" : ""} data-identify-capture="${i}">${this.tr("Thu lại", "Capture again")}</button>` : ""}
             </article>`;
           }).join("")}
@@ -1905,7 +1905,7 @@ class HanjooIrPanel extends HTMLElement {
         this.render();
         return false;
       }
-      const row = { step: stepIndex, label: step.label, expected: step.expected, timings: result.timings, frequency: result.frequency, timing_count: result.timing_count, duration_ms: result.duration_ms, quality: result.quality, probe: result.probe || null };
+      const row = { step: stepIndex, label: step.label, expected: step.expected, timings: result.timings, frequency: result.frequency, timing_count: result.timing_count, frame_count: result.frame_count || 1, duration_ms: result.duration_ms, quality: result.quality, probe: result.probe || null };
       this._identifyCaptures = [...this._identifyCaptures.filter(x => x.step !== stepIndex), row].sort((a,b) => a.step-b.step);
       const errors = { ...(this._identifyStepErrors || {}) }; delete errors[stepIndex]; this._identifyStepErrors = errors;
       this._identifyVerified = new Set();
@@ -1932,6 +1932,10 @@ class HanjooIrPanel extends HTMLElement {
       if (this._identifyCaptures.some(x => x.step === i) && i !== startAt) continue;
       const ok = await this.captureIdentifyStep(i);
       if (!ok) { this._identifyAutoRunning = false; this.render(); return; }
+      // Extra release guard: the backend already waits for a quiet window, but
+      // this small pause prevents a very long A/C key release/repeat tail from
+      // being interpreted as the next guided sample.
+      if (i + 1 < steps.length) await new Promise(resolve => setTimeout(resolve, 250));
     }
     this._identifyAutoRunning = false;
     this.render();

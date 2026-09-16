@@ -30,6 +30,7 @@ from .ir_code import IRCodeError
 from .manager import HanJooIRManager
 from .online_library import OnlineLibrary, OnlineLibraryError
 from .protocol_engine import ENGINE_SOURCE_ID
+from .raw_protocol_classifier import raw_protocol_candidates
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -967,6 +968,27 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
         except Exception as err:
             errors.append({"source": "local_recognition_probe", "error": str(err)})
 
+    # 1b) Raw timing-family fallback.  This is deliberately independent of
+    # Core/IRremoteESP8266 so a perfectly clean, common frame can still seed
+    # brand/profile lookup when a compiled decoder misses it.  It never marks a
+    # concrete profile safe by itself.
+    heuristic_candidates = raw_protocol_candidates(cleaned)
+    if heuristic_candidates:
+        existing_groups = {str(r.get("group_id") or "") for r in candidates}
+        for row in heuristic_candidates:
+            gid = str(row.get("group_id") or "")
+            if gid and gid in existing_groups:
+                existing = next((x for x in candidates if str(x.get("group_id") or "") == gid), None)
+                if existing is not None:
+                    sources = set(existing.get("evidence_sources") or [])
+                    sources.update(row.get("evidence_sources") or [])
+                    existing["evidence_sources"] = sorted(sources)
+                    existing.setdefault("timing_diagnostics", row.get("timing_diagnostics"))
+                continue
+            candidates.append(row)
+            if gid:
+                existing_groups.add(gid)
+
     # 2) Cross-check local saved profiles and online profile libraries.
     # Generic protocols such as NEC/RC5 identify the wire protocol but often
     # cannot identify a brand/device by themselves.  Exact RAW matches against
@@ -1051,6 +1073,7 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
         "sources_used":{
             "hanjoo_protocol":bool(settings.get("protocol_engine", True)),
             "irremoteesp8266":bool(settings.get("protocol_engine", True)),
+            "raw_timing_heuristic":bool(heuristic_candidates),
             "saved_profile":True,
             "smartir":bool(settings.get("smartir") and online_queries),
             "flipper_irdb":bool(settings.get("flipper_irdb") and online_queries),

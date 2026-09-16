@@ -1,4 +1,4 @@
-/* HanJoo IR Manager v0.5.5 - dependency-free Home Assistant admin panel */
+/* HanJoo IR Manager v0.5.6 - dependency-free Home Assistant admin panel */
 
 // Home Assistant's native device page currently hard-codes its toolbar back path
 // to /config/devices/dashboard. When a device was opened from HanJoo, intercept
@@ -915,7 +915,9 @@ class HanjooIrPanel extends HTMLElement {
     const preview = timings.slice(0, 22).join(" ");
     const suffix = timings.length > 22 ? " …" : "";
     const freq = Number(cap?.frequency || 0);
-    return `<small class="capture-recognition"><b>${this.tr("Mã nhận được", "Received code")}:</b> ${freq ? `${Math.round(freq/1000)} kHz · ` : ""}${this.esc(preview)}${suffix}</small>`;
+    const hint = Array.isArray(cap?.protocol_hints) ? cap.protocol_hints[0] : null;
+    const hintText = hint?.protocol ? ` · ${this.tr("Nhận dạng sơ bộ", "Preliminary")}: <b>${this.esc(hint.brand ? `${hint.brand} ${hint.protocol}` : hint.protocol)}</b> ${Number(hint.confidence || 0)}%` : "";
+    return `<small class="capture-recognition"><b>${this.tr("Mã nhận được", "Received code")}:</b> ${freq ? `${Math.round(freq/1000)} kHz · ` : ""}${this.esc(preview)}${suffix}${hintText}</small>`;
   }
 
   renderRemoteIdentify() {
@@ -929,7 +931,15 @@ class HanjooIrPanel extends HTMLElement {
     const captured = new Map((this._identifyCaptures || []).map(x => [x.step, x]));
     const r = this._identifyResult;
     const candidates = r?.candidates || [];
-    const sourceLabel = s => s === "protocol_engine" ? "HanJoo Protocol" : this.sourceLabel(s);
+    const sourceLabel = s => s === "protocol_engine" ? "HanJoo Protocol" : s === "raw_timing_heuristic" ? "Raw timing" : this.sourceLabel(s);
+    const usedSourceLabels = Object.entries(r?.sources_used || {}).filter(([, enabled]) => !!enabled).map(([key]) => ({
+      hanjoo_protocol: "HanJoo Core",
+      irremoteesp8266: "IRremoteESP8266",
+      raw_timing_heuristic: "Raw timing",
+      saved_profile: this.tr("Profile đã lưu", "Saved profiles"),
+      smartir: "SmartIR",
+      flipper_irdb: "Flipper-IRDB",
+    }[key] || key));
     const kindLabel = k => this.kindLabel(k === "climate" ? "air_conditioner" : k);
     return `
       <section class="subsection identify-box">
@@ -973,7 +983,7 @@ class HanjooIrPanel extends HTMLElement {
           <h3>${r.recommended ? this.tr("✓ Có khuyến nghị an toàn", "✓ Safe recommendation") : this.tr("Không có khuyến nghị tự động", "No automatic recommendation")}</h3>
           <p>${this.esc(this._lang === "vi" ? (r.message_vi || r.message || "") : (r.message_en || this.translateText(r.message || "")))}</p>
           ${r.inferred_kind ? `<div class="meta"><span>Nhận dạng: <b>${this.esc(kindLabel(r.inferred_kind))}</b></span></div>` : ""}
-          <div class="meta"><span>${this.tr("Nguồn", "Sources")}: HanJoo Core</span></div>
+          <div class="meta"><span>${this.tr("Nguồn", "Sources")}: ${this.esc(usedSourceLabels.join(" · ") || "HanJoo Core")}</span></div>
           ${!r.recommended ? `<div class="muted">${this.tr("Nếu Core không nhận diện đủ chắc, hãy chuyển sang tìm theo hãng/model hoặc học thủ công.", "If Core cannot identify the remote reliably, switch to brand/model search or manual learning.")}</div>
           ${!r.recommended ? `<div class="actions fallback-actions"><button data-identify-search>${this.tr("Tìm theo hãng/model", "Search by brand/model")}</button><button data-identify-manual>${this.tr("Học thủ công", "Manual learning")}</button></div>` : ""}` : ""}
           ${candidates.length ? `<div class="identify-candidates">${candidates.slice(0,8).map((x) => {

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 DOMAIN = "hanjoo_ir"
 NAME = "HanJoo IR Manager"
-VERSION = "0.6.1"
+VERSION = "0.6.3"
 AUTHOR_NAME = "HanJoo"
 AUTHOR_FACEBOOK = "Kim Han Yuu"
 AUTHOR_EMAIL = "kimhanzoo@gmail.com"
@@ -42,10 +42,6 @@ DEVICE_TYPES = {
     DEVICE_TYPE_CLIMATE,
 }
 
-# Native HA integrations that consume the 2026.x infrared platform.
-# HanJoo opens their official config flow instead of reimplementing their
-# protocol logic. This catalog is deliberately data-only so adding another
-# native integration later does not require touching the manager internals.
 NATIVE_INTEGRATIONS = [
     {
         "domain": "lg_infrared",
@@ -105,7 +101,6 @@ NATIVE_INTEGRATIONS = [
     },
 ]
 
-# Command templates for fallback learned/custom devices.
 REMOTE_TEMPLATES: dict[str, dict[str, str]] = {
     "tv": {
         "power": "Nguồn",
@@ -201,11 +196,9 @@ REMOTE_TEMPLATES: dict[str, dict[str, str]] = {
     },
     "custom": {},
 }
-# Audio devices share a sensible learned-button starter set.
 REMOTE_TEMPLATES["soundbar"] = dict(REMOTE_TEMPLATES["speaker"])
 REMOTE_TEMPLATES["receiver"] = dict(REMOTE_TEMPLATES["speaker"])
 
-# Maps the user-facing kind chosen in the panel to the semantic HA platform.
 FALLBACK_KIND_TO_TYPE = {
     "tv": DEVICE_TYPE_MEDIA_PLAYER,
     "projector": DEVICE_TYPE_MEDIA_PLAYER,

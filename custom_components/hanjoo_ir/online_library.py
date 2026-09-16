@@ -300,14 +300,36 @@ class OnlineLibrary:
         rows = await self.async_catalog(force=force)
         query_l = " ".join(query.lower().split())
 
+        # UI/device vocabulary and upstream-library vocabulary are not identical.
+        # SmartIR calls A/C profiles ``climate`` and most AV profiles
+        # ``media_player`` while HanJoo exposes friendlier device kinds such as
+        # ``air_conditioner`` and ``tv``.  Comparing them literally used to
+        # filter out common Daikin/LG/Panasonic results before ranking.
+        kind_aliases = {
+            "air_conditioner": {"air_conditioner", "climate"},
+            "climate": {"air_conditioner", "climate"},
+            "tv": {"tv", "media_player"},
+            "media_player": {"tv", "media_player"},
+            "projector": {"projector", "media_player"},
+            "speaker": {"speaker", "soundbar", "receiver", "media_player"},
+            "soundbar": {"speaker", "soundbar", "media_player"},
+            "receiver": {"receiver", "amplifier", "media_player"},
+        }
+        wanted_kinds = kind_aliases.get(str(kind or "").lower(), {str(kind or "").lower()}) if kind else set()
+
+        def kind_matches(row: dict[str, Any]) -> bool:
+            if not wanted_kinds:
+                return True
+            row_kinds = {
+                str(row.get("kind") or "").lower(),
+                str(row.get("semantic_type") or "").lower(),
+            }
+            return bool(wanted_kinds & row_kinds)
+
         filtered = [
             row
             for row in rows
-            if (
-                not kind
-                or row.get("kind") == kind
-                or row.get("semantic_type") == kind
-            )
+            if kind_matches(row)
             and (not query_l or query_l in row.get("search", ""))
         ]
 

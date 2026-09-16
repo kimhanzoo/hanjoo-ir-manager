@@ -1,4 +1,4 @@
-/* HanJoo IR Manager v0.5.3 - dependency-free Home Assistant admin panel */
+/* HanJoo IR Manager v0.5.5 - dependency-free Home Assistant admin panel */
 
 // Home Assistant's native device page currently hard-codes its toolbar back path
 // to /config/devices/dashboard. When a device was opened from HanJoo, intercept
@@ -58,6 +58,8 @@ class HanjooIrPanel extends HTMLElement {
     this._identifyCaptures = [];
     this._identifyResult = null;
     this._identifyCapturing = false;
+    this._identifyAutoRunning = false;
+    this._identifyStepErrors = {};
     this._identifyAnalyzing = false;
     this._identifyError = "";
     this._identifyVerified = new Set();
@@ -393,16 +395,16 @@ class HanjooIrPanel extends HTMLElement {
       ["Choose device type and enter brand/model if known. HanJoo searches all enabled sources and ranks the best options first.", "Choose device type and enter brand/model if known. HanJoo searches all enabled sources and ranks the best options first."],
       ["IR blaster used for Test/Add", "IR blaster used for Test/Add"],
 
-      ["Chuẩn bị remote sao cho lần bấm tiếp theo phát trạng thái Cool 24°C (ví dụ đang 23°C rồi bấm Temp+).", "Prepare the remote so the next press sends Cool 24°C (for example, start at 23°C and press Temp+)."],
-      ["Từ 24°C, bấm Thu tín hiệu rồi bấm Temp+ một lần để remote phát Cool 25°C.", "From 24°C, click Capture signal and press Temp+ once so the remote sends Cool 25°C."],
-      ["Từ 25°C, bấm Thu tín hiệu rồi bấm Temp+ một lần để remote phát Cool 26°C.", "From 25°C, click Capture signal and press Temp+ once so the remote sends Cool 26°C."],
-      ["Bấm OFF. Mẫu này không bắt buộc nhưng giúp phân biệt các protocol gần giống nhau.", "Press OFF. This sample is optional but helps distinguish similar protocols."],
+      ["Đặt remote ở Cool 23°C. Khi HanJoo chờ bước này, bấm Temp+ một lần để phát trạng thái Cool 24°C.", "Prepare the remote so the next press sends Cool 24°C (for example, start at 23°C and press Temp+)."],
+      ["HanJoo tự chuyển sang bước này. Khi thấy “đang chờ”, bấm Temp+ một lần để phát Cool 25°C.", "From 24°C, click Capture signal and press Temp+ once so the remote sends Cool 25°C."],
+      ["HanJoo tự chuyển tiếp. Khi thấy “đang chờ”, bấm Temp+ một lần để phát Cool 26°C.", "From 25°C, click Capture signal and press Temp+ once so the remote sends Cool 26°C."],
+      ["Khi HanJoo chuyển đến bước cuối, bấm OFF. Mẫu này giúp phân biệt các protocol gần giống nhau.", "Press OFF. This sample is optional but helps distinguish similar protocols."],
       ["Bấm “Thu tín hiệu”, sau đó nhấn Power trên remote.", "Click “Capture signal”, then press Power on the remote."],
       ["Thu một lệnh khác:", "Capture a different command:"],
       ["Nên dùng nút có chức năng rõ và khác Power.", "Use a clearly defined button that is different from Power."],
       ["Thu lệnh thứ ba:", "Capture a third command:"],
       ["Càng nhiều lệnh khác nhau càng dễ loại profile sai.", "More distinct commands make it easier to reject incorrect profiles."],
-      ["Không bắt buộc. Thu thêm một nút khác để tăng độ chắc chắn nếu các ứng viên còn sát nhau.", "Optional. Capture another different button to improve confidence if candidates are still close."],
+      ["HanJoo sẽ chờ thêm một nút khác để tăng độ chắc chắn nếu các ứng viên còn sát nhau.", "Optional. Capture another different button to improve confidence if candidates are still close."],
 
       ["Thư viện IR & nguồn tìm kiếm", "IR Library & search sources"],
       ["Chọn những nguồn HanJoo được phép dùng khi thêm thiết bị. Càng ít nguồn càng gọn; HanJoo tự xếp hạng nên bạn không phải chọn nguồn mỗi lần.", "Choose which sources HanJoo may use when adding devices. HanJoo ranks them automatically, so you do not need to choose a source each time."],
@@ -865,10 +867,10 @@ class HanjooIrPanel extends HTMLElement {
 
   identifySteps() {
     if (this._identifyKind === "air_conditioner") return [
-      { label: "Cool 24°C", help: "Chuẩn bị remote sao cho lần bấm tiếp theo phát trạng thái Cool 24°C (ví dụ đang 23°C rồi bấm Temp+).", expected: { power: true, mode: "cool", temp: 24 } },
-      { label: "Cool 25°C", help: "Từ 24°C, bấm Thu tín hiệu rồi bấm Temp+ một lần để remote phát Cool 25°C.", expected: { power: true, mode: "cool", temp: 25 } },
-      { label: "Cool 26°C", help: "Từ 25°C, bấm Thu tín hiệu rồi bấm Temp+ một lần để remote phát Cool 26°C.", expected: { power: true, mode: "cool", temp: 26 } },
-      { label: "Power Off", help: "Bấm OFF. Mẫu này không bắt buộc nhưng giúp phân biệt các protocol gần giống nhau.", expected: { power: false } },
+      { label: "Cool 24°C", help: "Đặt remote ở Cool 23°C. Khi HanJoo chờ bước này, bấm Temp+ một lần để phát trạng thái Cool 24°C.", expected: { power: true, mode: "cool", temp: 24 } },
+      { label: "Cool 25°C", help: "HanJoo tự chuyển sang bước này. Khi thấy “đang chờ”, bấm Temp+ một lần để phát Cool 25°C.", expected: { power: true, mode: "cool", temp: 25 } },
+      { label: "Cool 26°C", help: "HanJoo tự chuyển tiếp. Khi thấy “đang chờ”, bấm Temp+ một lần để phát Cool 26°C.", expected: { power: true, mode: "cool", temp: 26 } },
+      { label: "Power Off", help: "Khi HanJoo chuyển đến bước cuối, bấm OFF. Mẫu này giúp phân biệt các protocol gần giống nhau.", expected: { power: false } },
     ];
     const byKind = {
       tv: ["Power", "Volume +", "Mute"],
@@ -878,10 +880,10 @@ class HanjooIrPanel extends HTMLElement {
     };
     const labels = byKind[this._identifyKind] || ["Power", "Nút chức năng thứ hai", "Nút chức năng thứ ba"];
     return [
-      { label: labels[0], help: `Bấm “Thu tín hiệu”, sau đó nhấn ${labels[0]} trên remote.`, expected: {} },
-      { label: labels[1], help: `Thu một lệnh khác: ${labels[1]}. Nên dùng nút có chức năng rõ và khác Power.`, expected: {} },
-      { label: labels[2], help: `Thu lệnh thứ ba: ${labels[2]}. Càng nhiều lệnh khác nhau càng dễ loại profile sai.`, expected: {} },
-      { label: "Mẫu bổ sung", help: "Không bắt buộc. Thu thêm một nút khác để tăng độ chắc chắn nếu các ứng viên còn sát nhau.", expected: {} },
+      { label: labels[0], help: `Khi HanJoo chờ bước 1, nhấn ${labels[0]} trên remote.`, expected: {} },
+      { label: labels[1], help: `HanJoo tự chuyển sang bước 2; nhấn ${labels[1]}.`, expected: {} },
+      { label: labels[2], help: `HanJoo tự chuyển sang bước 3; nhấn ${labels[2]}.`, expected: {} },
+      { label: "Mẫu bổ sung", help: "HanJoo sẽ chờ thêm một nút khác để tăng độ chắc chắn nếu các ứng viên còn sát nhau.", expected: {} },
     ];
   }
 
@@ -949,20 +951,23 @@ class HanjooIrPanel extends HTMLElement {
           <label>${this.tr("Transmitter để Test", "Transmitter for Test")}<select id="identify-emitter">${emitterOptions}</select></label>
         </div>
         ${!this._hardware.receivers.length ? `<div class="callout error-callout">Không có Infrared Receiver. Không thể dùng nhận diện bằng remote.</div>` : ""}
+        <div class="actions identify-actions identify-start-actions">
+          <button class="primary" id="identify-start" ${(this._identifyCapturing || this._identifyAnalyzing || this._identifyAutoRunning || !this._hardware.receivers.length) ? "disabled" : ""}>${this._identifyAutoRunning || this._identifyCapturing ? this.tr("Đang chờ remote…", "Waiting for remote…") : (this._identifyCaptures.length ? this.tr("Tiếp tục nhận tín hiệu", "Continue capture") : this.tr("Bắt đầu", "Start"))}</button>
+          <button id="identify-reset" ${(!this._identifyCaptures.length && !Object.keys(this._identifyStepErrors || {}).length) || this._identifyCapturing ? "disabled" : ""}>${this.tr("Làm lại từ đầu", "Start over")}</button>
+        </div>
         <div class="identify-steps">
           ${steps.map((step, i) => {
             const cap = captured.get(i);
-            return `<article class="identify-step ${cap ? "done" : ""}">
-              <div class="identify-step-num">${i + 1}</div>
-              <div class="identify-step-main"><b>${this.esc(step.label)}</b><span>${this.esc(step.help)}</span>${cap ? `<small>✓ ${cap.timing_count} timings · ${cap.duration_ms} ms · ${this.esc(cap.quality)}</small>${this.renderCaptureRecognition(cap)}` : ""}</div>
-              <button ${this._identifyCapturing ? "disabled" : ""} data-identify-capture="${i}">${cap ? this.tr("Thu lại", "Capture again") : this.tr("Thu tín hiệu", "Capture signal")}</button>
+            const stepError = (this._identifyStepErrors || {})[i];
+            const active = this._identifyAutoRunning && !cap && !stepError && i === steps.findIndex((_, idx) => !captured.has(idx));
+            return `<article class="identify-step ${cap ? "done" : stepError ? "error" : active ? "active" : ""}">
+              <div class="identify-step-num">${cap ? "✓" : i + 1}</div>
+              <div class="identify-step-main"><b>${this.esc(step.label)}</b><span>${this.esc(step.help)}</span>${active ? `<small>● ${this.tr("Đang chờ bạn bấm nút này trên remote…", "Waiting for this button on the remote…")}</small>` : ""}${stepError ? `<small class="step-error">⚠ ${this.esc(stepError)}</small>` : ""}${cap ? `<small>✓ ${cap.timing_count} timings · ${cap.duration_ms} ms · ${this.esc(cap.quality)}</small>${this.renderCaptureRecognition(cap)}` : ""}</div>
+              ${(cap || stepError) ? `<button ${this._identifyCapturing ? "disabled" : ""} data-identify-capture="${i}">${this.tr("Thu lại", "Capture again")}</button>` : ""}
             </article>`;
           }).join("")}
         </div>
-        <div class="actions identify-actions">
-          <button id="identify-reset" ${!this._identifyCaptures.length ? "disabled" : ""}>${this.tr("Xóa mẫu", "Clear samples")}</button>
-          <button class="primary" id="identify-analyze" ${(this._identifyCaptures.length < 3 || this._identifyCapturing || this._identifyAnalyzing) ? "disabled" : ""}>${this._identifyAnalyzing ? this.tr("Đang phân tích…", "Analyzing…") : `${this.tr("Phân tích", "Analyze")} ${this._identifyCaptures.length} ${this.tr("mẫu", "samples")}`}</button>
-        </div>
+        ${this._identifyCaptures.length >= 3 && !this._identifyAutoRunning ? `<div class="actions identify-actions"><button id="identify-analyze" ${(this._identifyCapturing || this._identifyAnalyzing) ? "disabled" : ""}>${this._identifyAnalyzing ? this.tr("Đang phân tích…", "Analyzing…") : this.tr("Phân tích lại", "Analyze again")}</button></div>` : ""}
         ${this._identifyError ? `<div class="callout error-callout">${this.esc(this._identifyError)}</div>` : ""}
         ${r ? `<div class="identify-result ${r.recommended ? "strong" : "caution"}">
           <h3>${r.recommended ? this.tr("✓ Có khuyến nghị an toàn", "✓ Safe recommendation") : this.tr("Không có khuyến nghị tự động", "No automatic recommendation")}</h3>
@@ -1575,18 +1580,20 @@ class HanjooIrPanel extends HTMLElement {
       this.render();
     }));
     const identifyKind = q("#identify-kind");
-    if (identifyKind) identifyKind.addEventListener("change", e => { this._identifyKind = e.target.value; this._identifyCaptures = []; this._identifyResult = null; this._identifyVerified = new Set(); this._identifyError = ""; this.render(); });
+    if (identifyKind) identifyKind.addEventListener("change", e => { this._identifyKind = e.target.value; this._identifyCaptures = []; this._identifyStepErrors = {}; this._identifyResult = null; this._identifyVerified = new Set(); this._identifyError = ""; this.render(); });
     const identifyQuery = q("#identify-query");
     if (identifyQuery) identifyQuery.addEventListener("input", e => { this._identifyQuery = e.target.value; });
     const identifyReceiver = q("#identify-receiver");
-    if (identifyReceiver) identifyReceiver.addEventListener("change", e => { this._discoverReceiver = e.target.value; this._identifyCaptures = []; this._identifyResult = null; });
+    if (identifyReceiver) identifyReceiver.addEventListener("change", e => { this._discoverReceiver = e.target.value; this._identifyCaptures = []; this._identifyStepErrors = {}; this._identifyResult = null; });
     const identifyEmitter = q("#identify-emitter");
     if (identifyEmitter) identifyEmitter.addEventListener("change", e => { this._discoverEmitter = e.target.value; });
-    qa("[data-identify-capture]").forEach(el => el.addEventListener("click", () => this.captureIdentifyStep(Number(el.dataset.identifyCapture))));
+    qa("[data-identify-capture]").forEach(el => el.addEventListener("click", () => this.retryIdentifyStep(Number(el.dataset.identifyCapture))));
+    const identifyStart = q("#identify-start");
+    if (identifyStart) identifyStart.addEventListener("click", () => this.startRemoteIdentifySequence());
     const identifyAnalyze = q("#identify-analyze");
     if (identifyAnalyze) identifyAnalyze.addEventListener("click", () => this.analyzeRemoteIdentity());
     const identifyReset = q("#identify-reset");
-    if (identifyReset) identifyReset.addEventListener("click", () => { this._identifyCaptures = []; this._identifyResult = null; this._identifyVerified = new Set(); this._identifyError = ""; this.render(); });
+    if (identifyReset) identifyReset.addEventListener("click", () => { this._identifyCaptures = []; this._identifyStepErrors = {}; this._identifyResult = null; this._identifyVerified = new Set(); this._identifyError = ""; this.render(); });
     qa("[data-identify-test]").forEach(el => el.addEventListener("click", () => this.testIdentifiedCandidate(el.dataset.identifyTest)));
     qa("[data-identify-add]").forEach(el => el.addEventListener("click", () => this.addIdentifiedCandidate(el.dataset.identifyAdd)));
 
@@ -1871,26 +1878,64 @@ class HanjooIrPanel extends HTMLElement {
 
   async captureIdentifyStep(stepIndex) {
     const receiver = this._discoverReceiver || this._hardware.receivers[0] || "";
-    if (!receiver) return this.toast("Hãy chọn IR Receiver", true);
+    if (!receiver) { this.toast("Hãy chọn IR Receiver", true); return false; }
     const step = this.identifySteps()[stepIndex];
-    if (!step) return;
+    if (!step) return false;
     try {
-      this._identifyCapturing = true; this._identifyError = ""; this._identifyResult = null;
-      this._busyText = `⏳ ${step.label}: hãy bấm remote ngay…`; this.render();
+      this._identifyCapturing = true;
+      this._identifyError = "";
+      this._identifyResult = null;
+      this._busyText = `⏳ ${step.label}: ${this.tr("hãy bấm nút trên remote…", "press the remote button now…")}`;
+      this.render();
       const result = await this.ws("remote_identify/capture", { receiver, timeout: 20 });
       this._identifyCapturing = false; this._busyText = "";
-      if (!result.usable) { this._identifyError = result.quality_message || "Tín hiệu không đủ chất lượng. Hãy thu lại."; this.render(); return; }
-      const row = { step: stepIndex, label: step.label, expected: step.expected, timings: result.timings, frequency: result.frequency, timing_count: result.timing_count, duration_ms: result.duration_ms, quality: result.quality, probe: result.probe || null };
-      this._identifyCaptures = [...this._identifyCaptures.filter(x => x.step !== stepIndex), row].sort((a,b) => a.step-b.step); this._identifyVerified = new Set();
-      this.render(); this.toast(`${this.tr("Đã thu mẫu", "Captured sample")} ${stepIndex + 1}: ${result.timing_count} timings`);
-
-      // The guided workflow has four slots. Analyze automatically as soon as
-      // all four are available. The Analyze button remains for manual reruns.
-      const required = this.identifySteps().length;
-      if (required === 4 && this._identifyCaptures.length >= 4 && !this._identifyAnalyzing) {
-        await this.analyzeRemoteIdentity(true);
+      if (!result.usable) {
+        this._identifyStepErrors = { ...(this._identifyStepErrors || {}), [stepIndex]: result.quality_message || this.tr("Tín hiệu không đủ chất lượng. Hãy thu lại.", "Signal quality is insufficient. Capture again.") };
+        this._identifyError = this.tr(`Mẫu ${stepIndex + 1} chưa hợp lệ. Hãy bấm “Thu lại” tại bước này.`, `Sample ${stepIndex + 1} is invalid. Use “Capture again” for this step.`);
+        this.render();
+        return false;
       }
-    } catch (err) { this._identifyCapturing = false; this._busyText = ""; this._identifyError = this.errText(err); this.render(); }
+      const row = { step: stepIndex, label: step.label, expected: step.expected, timings: result.timings, frequency: result.frequency, timing_count: result.timing_count, duration_ms: result.duration_ms, quality: result.quality, probe: result.probe || null };
+      this._identifyCaptures = [...this._identifyCaptures.filter(x => x.step !== stepIndex), row].sort((a,b) => a.step-b.step);
+      const errors = { ...(this._identifyStepErrors || {}) }; delete errors[stepIndex]; this._identifyStepErrors = errors;
+      this._identifyVerified = new Set();
+      this.render();
+      return true;
+    } catch (err) {
+      this._identifyCapturing = false; this._busyText = "";
+      this._identifyStepErrors = { ...(this._identifyStepErrors || {}), [stepIndex]: this.errText(err) };
+      this._identifyError = this.tr(`Không thu được mẫu ${stepIndex + 1}. Hãy thử lại bước này.`, `Could not capture sample ${stepIndex + 1}. Retry this step.`);
+      this.render();
+      return false;
+    }
+  }
+
+  async startRemoteIdentifySequence(startAt = null) {
+    if (this._identifyAutoRunning || this._identifyCapturing) return;
+    const steps = this.identifySteps();
+    let first = Number.isInteger(startAt) ? startAt : steps.findIndex((_, i) => !this._identifyCaptures.some(x => x.step === i));
+    if (first < 0) first = 0;
+    this._identifyAutoRunning = true;
+    this._identifyError = "";
+    this.render();
+    for (let i = first; i < steps.length; i++) {
+      if (this._identifyCaptures.some(x => x.step === i) && i !== startAt) continue;
+      const ok = await this.captureIdentifyStep(i);
+      if (!ok) { this._identifyAutoRunning = false; this.render(); return; }
+    }
+    this._identifyAutoRunning = false;
+    this.render();
+    if (this._identifyCaptures.length >= steps.length) await this.analyzeRemoteIdentity(true);
+  }
+
+  async retryIdentifyStep(stepIndex) {
+    if (this._identifyCapturing || this._identifyAutoRunning) return;
+    const ok = await this.captureIdentifyStep(stepIndex);
+    if (!ok) return;
+    const steps = this.identifySteps();
+    const next = steps.findIndex((_, i) => i > stepIndex && !this._identifyCaptures.some(x => x.step === i));
+    if (next >= 0) await this.startRemoteIdentifySequence(next);
+    else if (this._identifyCaptures.length >= steps.length) await this.analyzeRemoteIdentity(true);
   }
 
   async analyzeRemoteIdentity(autoRun = false) {

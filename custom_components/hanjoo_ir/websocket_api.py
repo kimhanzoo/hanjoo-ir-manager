@@ -289,11 +289,17 @@ def _kind_matches_native(kind: str | None, device_types: list[str]) -> bool:
     if not kind:
         return True
     aliases = {
-        "climate": "air_conditioner",
-        "media_player": "tv",
+        "climate": {"air_conditioner"},
+        "air_conditioner": {"air_conditioner"},
+        "media_player": {"tv", "speaker", "soundbar", "receiver", "amplifier", "projector"},
+        "tv": {"tv"},
+        "speaker": {"speaker", "soundbar"},
+        "soundbar": {"soundbar", "speaker"},
+        "receiver": {"receiver", "amplifier"},
+        "projector": {"projector"},
     }
-    wanted = aliases.get(kind, kind)
-    return wanted in device_types
+    wanted = aliases.get(str(kind).lower(), {str(kind).lower()})
+    return bool(wanted & {str(x).lower() for x in device_types})
 
 
 def _candidate_text(candidate: dict[str, Any]) -> str:
@@ -869,7 +875,7 @@ async def _exhaustive_codec_candidates(manager, captures: list[dict[str, Any]]) 
 )
 @websocket_api.async_response
 async def ws_fusion_identify(hass, connection, msg) -> None:
-    """Identify a remote locally with HanJoo Core protocol decoders only."""
+    """Identify a remote by fusing local protocol decoders with matching profiles."""
     runtime = _runtime(hass)
     if runtime is None:
         connection.send_error(msg["id"], "not_configured", "HanJoo IR chưa được cấu hình")
@@ -961,9 +967,76 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
         except Exception as err:
             errors.append({"source": "local_recognition_probe", "error": str(err)})
 
-    # 2) Remote identification intentionally uses HanJoo Core only.
-    # SmartIR, Flipper-IRDB and saved profile browsing remain available in
-    # Search by brand/model, but never trigger Internet/profile work here.
+    # 2) Cross-check local saved profiles and online profile libraries.
+    # Generic protocols such as NEC/RC5 identify the wire protocol but often
+    # cannot identify a brand/device by themselves.  Exact RAW matches against
+    # SmartIR/Flipper (especially when the user gives a brand/model hint or a
+    # branded decoder such as Daikin/LG/Panasonic supplies one) provide the
+    # missing evidence.
+    profile_rows_checked = 0
+
+    for profile in manager.get_profiles().values():
+        try:
+            row = profile_candidate(
+                profile, cleaned, source="saved_profile",
+                candidate_id=f"saved:{profile.get('id')}",
+            )
+            if row is not None:
+                row["group_id"] = row.get("group_id") or f"profile:saved:{profile.get('id')}"
+                candidates.append(row)
+                profile_rows_checked += 1
+        except Exception:
+            continue
+
+    query_hint = str(msg.get("query_hint") or "").strip()
+    online_queries: list[str] = []
+    if query_hint:
+        online_queries.append(query_hint)
+    # Reuse brand evidence from protocol decoders.  This makes a no-hint A/C
+    # flow useful without blindly downloading an entire Internet corpus.
+    for row in candidates:
+        brand = str((row.get("candidate") or {}).get("brand") or "").strip()
+        if brand and brand.lower() not in {q.lower() for q in online_queries}:
+            online_queries.append(brand)
+        if len(online_queries) >= 4:
+            break
+
+    if online is not None and (settings.get("smartir") or settings.get("flipper_irdb")) and online_queries:
+        catalog_rows: dict[str, dict[str, Any]] = {}
+        search_kind = None if kind_hint in {"", "auto"} else kind_hint
+        for q in online_queries:
+            try:
+                found = await online.async_search(q, search_kind, limit=40)
+                for item in found.get("items") or []:
+                    cid = str(item.get("id") or "")
+                    if cid:
+                        catalog_rows.setdefault(cid, dict(item))
+            except Exception as err:
+                errors.append({"source": "online_profile_search", "error": str(err)})
+
+        sem = asyncio.Semaphore(6)
+        async def _score_online(item: dict[str, Any]):
+            nonlocal profile_rows_checked
+            cid = str(item.get("id") or "")
+            if not cid:
+                return None
+            try:
+                async with sem:
+                    imported = await online.async_fetch_profile(cid)
+                profile_rows_checked += 1
+                row = profile_candidate(
+                    imported.profile, cleaned,
+                    source=str(item.get("source") or "online"),
+                    candidate_id=cid, catalog_id=cid,
+                )
+                if row is not None:
+                    row["group_id"] = row.get("group_id") or f"profile:{cid}"
+                return row
+            except Exception:
+                return None
+
+        scored = await asyncio.gather(*(_score_online(item) for item in list(catalog_rows.values())[:60]))
+        candidates.extend(row for row in scored if row is not None)
 
     result=apply_safe_recommendation(candidates,len(cleaned))
     for row in result.get("candidates") or []: row.pop("_core_recommended",None)
@@ -972,7 +1045,19 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
         for row in result.get("candidates") or []:
             if (row.get("candidate") or {}).get("id")==result.get("recommended_id"):
                 inferred=(row.get("candidate") or {}).get("kind"); break
-    result.update({"mode":"fusion","inferred_kind":inferred,"sources_used":{"hanjoo_protocol":True,"irremoteesp8266":True,"smartir":False,"flipper_irdb":False},"online_profiles_checked":0,"errors":errors[:8]})
+    result.update({
+        "mode":"fusion",
+        "inferred_kind":inferred,
+        "sources_used":{
+            "hanjoo_protocol":bool(settings.get("protocol_engine", True)),
+            "irremoteesp8266":bool(settings.get("protocol_engine", True)),
+            "saved_profile":True,
+            "smartir":bool(settings.get("smartir") and online_queries),
+            "flipper_irdb":bool(settings.get("flipper_irdb") and online_queries),
+        },
+        "online_profiles_checked":profile_rows_checked,
+        "errors":errors[:8],
+    })
     connection.send_result(msg["id"], result)
 
 

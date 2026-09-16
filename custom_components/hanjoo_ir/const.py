@@ -9,16 +9,7 @@ AUTHOR_FACEBOOK = "Kim Han Yuu"
 AUTHOR_EMAIL = "kimhanzoo@gmail.com"
 
 CORE_API_VERSION = 1
-# Home Assistant Supervisor names add-ons installed from a GitHub repository as
-# {repository_hash}_{slug}. The repository hash for
-# https://github.com/kimhanzoo/HanJoo_IR_Addon is 83a35d78 (SHA-1, first 8
-# characters). DNS hostnames replace underscores with hyphens.
-# Keep the local development hostname as a fallback.
-CORE_BASE_URLS = (
-    "http://83a35d78-hanjoo-ir-core:8099",
-    "http://local-hanjoo-ir-core:8099",
-)
-CORE_BASE_URL = CORE_BASE_URLS[0]
+CORE_BASE_URL = "http://local-hanjoo-ir-core:8099"
 CORE_REQUEST_TIMEOUT = 3.0
 
 PANEL_TITLE = "HanJoo IR"
@@ -51,6 +42,10 @@ DEVICE_TYPES = {
     DEVICE_TYPE_CLIMATE,
 }
 
+# Native HA integrations that consume the 2026.x infrared platform.
+# HanJoo opens their official config flow instead of reimplementing their
+# protocol logic. This catalog is deliberately data-only so adding another
+# native integration later does not require touching the manager internals.
 NATIVE_INTEGRATIONS = [
     {
         "domain": "lg_infrared",
@@ -110,26 +105,107 @@ NATIVE_INTEGRATIONS = [
     },
 ]
 
+# Command templates for fallback learned/custom devices.
 REMOTE_TEMPLATES: dict[str, dict[str, str]] = {
     "tv": {
-        "power": "Nguồn", "on": "Bật", "off": "Tắt", "volume_up": "Âm lượng +",
-        "volume_down": "Âm lượng -", "mute": "Tắt tiếng", "input": "Nguồn vào",
-        "home": "Home", "menu": "Menu", "up": "Lên", "down": "Xuống", "left": "Trái",
-        "right": "Phải", "ok": "OK", "back": "Quay lại", "channel_up": "Kênh +",
-        "channel_down": "Kênh -", "play": "Phát", "pause": "Tạm dừng", "stop": "Dừng",
-        "num_0": "0", "num_1": "1", "num_2": "2", "num_3": "3", "num_4": "4",
-        "num_5": "5", "num_6": "6", "num_7": "7", "num_8": "8", "num_9": "9",
+        "power": "Nguồn",
+        "on": "Bật",
+        "off": "Tắt",
+        "volume_up": "Âm lượng +",
+        "volume_down": "Âm lượng -",
+        "mute": "Tắt tiếng",
+        "input": "Nguồn vào",
+        "home": "Home",
+        "menu": "Menu",
+        "up": "Lên",
+        "down": "Xuống",
+        "left": "Trái",
+        "right": "Phải",
+        "ok": "OK",
+        "back": "Quay lại",
+        "channel_up": "Kênh +",
+        "channel_down": "Kênh -",
+        "play": "Phát",
+        "pause": "Tạm dừng",
+        "stop": "Dừng",
+        "num_0": "0",
+        "num_1": "1",
+        "num_2": "2",
+        "num_3": "3",
+        "num_4": "4",
+        "num_5": "5",
+        "num_6": "6",
+        "num_7": "7",
+        "num_8": "8",
+        "num_9": "9",
     },
-    "projector": {"power": "Nguồn", "on": "Bật", "off": "Tắt", "input": "Nguồn vào", "menu": "Menu", "up": "Lên", "down": "Xuống", "left": "Trái", "right": "Phải", "ok": "OK", "back": "Quay lại", "volume_up": "Âm lượng +", "volume_down": "Âm lượng -", "mute": "Tắt tiếng", "freeze": "Đóng băng hình"},
-    "speaker": {"power": "Nguồn", "on": "Bật", "off": "Tắt", "volume_up": "Âm lượng +", "volume_down": "Âm lượng -", "mute": "Tắt tiếng", "input": "Nguồn vào", "play": "Phát", "pause": "Tạm dừng", "next": "Bài tiếp", "previous": "Bài trước"},
-    "fan": {"power": "Nguồn", "on": "Bật", "off": "Tắt", "speed_1": "Tốc độ 1", "speed_2": "Tốc độ 2", "speed_3": "Tốc độ 3", "oscillate": "Đảo gió", "mode": "Chế độ", "timer": "Hẹn giờ", "light": "Đèn"},
-    "washer": {"power": "Nguồn", "start_pause": "Bắt đầu / Tạm dừng", "program": "Chương trình", "temperature": "Nhiệt độ", "spin": "Vắt", "delay": "Hẹn giờ", "options": "Tùy chọn"},
-    "dishwasher": {"power": "Nguồn", "start_pause": "Bắt đầu / Tạm dừng", "program": "Chương trình", "delay": "Hẹn giờ", "extra_dry": "Sấy tăng cường", "half_load": "Nửa tải", "sanitize": "Diệt khuẩn"},
+    "projector": {
+        "power": "Nguồn",
+        "on": "Bật",
+        "off": "Tắt",
+        "input": "Nguồn vào",
+        "menu": "Menu",
+        "up": "Lên",
+        "down": "Xuống",
+        "left": "Trái",
+        "right": "Phải",
+        "ok": "OK",
+        "back": "Quay lại",
+        "volume_up": "Âm lượng +",
+        "volume_down": "Âm lượng -",
+        "mute": "Tắt tiếng",
+        "freeze": "Đóng băng hình",
+    },
+    "speaker": {
+        "power": "Nguồn",
+        "on": "Bật",
+        "off": "Tắt",
+        "volume_up": "Âm lượng +",
+        "volume_down": "Âm lượng -",
+        "mute": "Tắt tiếng",
+        "input": "Nguồn vào",
+        "play": "Phát",
+        "pause": "Tạm dừng",
+        "next": "Bài tiếp",
+        "previous": "Bài trước",
+    },
+    "fan": {
+        "power": "Nguồn",
+        "on": "Bật",
+        "off": "Tắt",
+        "speed_1": "Tốc độ 1",
+        "speed_2": "Tốc độ 2",
+        "speed_3": "Tốc độ 3",
+        "oscillate": "Đảo gió",
+        "mode": "Chế độ",
+        "timer": "Hẹn giờ",
+        "light": "Đèn",
+    },
+    "washer": {
+        "power": "Nguồn",
+        "start_pause": "Bắt đầu / Tạm dừng",
+        "program": "Chương trình",
+        "temperature": "Nhiệt độ",
+        "spin": "Vắt",
+        "delay": "Hẹn giờ",
+        "options": "Tùy chọn",
+    },
+    "dishwasher": {
+        "power": "Nguồn",
+        "start_pause": "Bắt đầu / Tạm dừng",
+        "program": "Chương trình",
+        "delay": "Hẹn giờ",
+        "extra_dry": "Sấy tăng cường",
+        "half_load": "Nửa tải",
+        "sanitize": "Diệt khuẩn",
+    },
     "custom": {},
 }
+# Audio devices share a sensible learned-button starter set.
 REMOTE_TEMPLATES["soundbar"] = dict(REMOTE_TEMPLATES["speaker"])
 REMOTE_TEMPLATES["receiver"] = dict(REMOTE_TEMPLATES["speaker"])
 
+# Maps the user-facing kind chosen in the panel to the semantic HA platform.
 FALLBACK_KIND_TO_TYPE = {
     "tv": DEVICE_TYPE_MEDIA_PLAYER,
     "projector": DEVICE_TYPE_MEDIA_PLAYER,

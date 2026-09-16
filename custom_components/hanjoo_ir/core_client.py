@@ -14,12 +14,19 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import CORE_API_VERSION, CORE_BASE_URLS, CORE_REQUEST_TIMEOUT
+from .const import CORE_API_VERSION, CORE_BASE_URL, CORE_REQUEST_TIMEOUT
+
 
 
 
 def _codec_timings(values: list[int]) -> list[int]:
-    """Convert Home Assistant signed mark/space timings to codec durations."""
+    """Convert Home Assistant signed mark/space timings to codec durations.
+
+    HA/infrared-protocols represents marks as positive values and spaces as
+    negative values. irtxrx decoders expect an alternating list of positive
+    microsecond durations. Keeping the sign caused every real receiver capture
+    to miss even though generated/ideal test vectors decoded correctly.
+    """
     out: list[int] = []
     for value in values:
         try:
@@ -31,7 +38,6 @@ def _codec_timings(values: list[int]) -> list[int]:
         out.append(usec)
     return out
 
-
 class HanJooCoreError(HomeAssistantError):
     """HanJoo Core is unavailable or returned an invalid response."""
 
@@ -39,8 +45,7 @@ class HanJooCoreError(HomeAssistantError):
 class HanJooCoreClient:
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
-        self._base_urls = tuple(url.rstrip("/") for url in CORE_BASE_URLS)
-        self.base_url = self._base_urls[0]
+        self.base_url = CORE_BASE_URL.rstrip("/")
 
     async def _json(
         self,
@@ -50,34 +55,23 @@ class HanJooCoreClient:
         payload: dict[str, Any] | None = None,
         timeout: float | None = None,
     ) -> Any:
-        """Call Core using the public-repository DNS name with local fallback."""
         session = async_get_clientsession(self.hass)
-        last_err: Exception | None = None
-        urls = [self.base_url, *[url for url in self._base_urls if url != self.base_url]]
-
-        for base_url in urls:
-            url = f"{base_url}{path}"
-            try:
-                async with asyncio.timeout(timeout or CORE_REQUEST_TIMEOUT):
-                    async with session.request(method, url, json=payload) as response:
-                        data = await response.json(content_type=None)
-                        if response.status >= 400:
-                            message = data.get("error") if isinstance(data, dict) else str(data)
-                            raise HanJooCoreError(
-                                f"HanJoo IR Core error {response.status}: {message}"
-                            )
-                        self.base_url = base_url
-                        return data
-            except HanJooCoreError:
-                raise
-            except (TimeoutError, OSError, ValueError) as err:
-                last_err = err
-                continue
-
-        raise HanJooCoreError(
-            "Cannot connect to HanJoo IR Core add-on. "
-            "Check that the add-on is installed, running, and healthy."
-        ) from last_err
+        url = f"{self.base_url}{path}"
+        try:
+            async with asyncio.timeout(timeout or CORE_REQUEST_TIMEOUT):
+                async with session.request(method, url, json=payload) as response:
+                    data = await response.json(content_type=None)
+                    if response.status >= 400:
+                        message = data.get("error") if isinstance(data, dict) else str(data)
+                        raise HanJooCoreError(f"HanJoo IR Core error {response.status}: {message}")
+                    return data
+        except HanJooCoreError:
+            raise
+        except (TimeoutError, OSError, ValueError) as err:
+            raise HanJooCoreError(
+                "Cannot connect to HanJoo IR Core add-on. "
+                "Check that the add-on is installed, running, and healthy."
+            ) from err
 
     async def health(self) -> dict[str, Any]:
         data = await self._json("GET", "/health")
@@ -92,6 +86,7 @@ class HanJooCoreClient:
     async def _json_probe(self, timings: list[int]) -> dict[str, Any]:
         """Probe every protocol registered by the public codec sidecar."""
         session = async_get_clientsession(self.hass)
+        # Same add-on hostname, dedicated internal sidecar port.
         host = self.base_url.split("://", 1)[-1].split(":", 1)[0]
         url = f"http://{host}:8101/v1/probe"
         try:
@@ -119,15 +114,10 @@ class HanJooCoreClient:
         host = self.base_url.split("://", 1)[-1].split(":", 1)[0]
         try:
             async with asyncio.timeout(10.0):
-                async with session.post(
-                    f"http://{host}:8101/v1/probe-all",
-                    json={"timings": _codec_timings(timings)},
-                ) as response:
+                async with session.post(f"http://{host}:8101/v1/probe-all", json={"timings": _codec_timings(timings)}) as response:
                     data = await response.json(content_type=None)
-                    if response.status >= 400:
-                        raise HanJooCoreError(f"HanJoo codec probe error {response.status}: {data}")
-                    if not isinstance(data, dict):
-                        raise HanJooCoreError("HanJoo codec probe returned an invalid response")
+                    if response.status >= 400: raise HanJooCoreError(f"HanJoo codec probe error {response.status}: {data}")
+                    if not isinstance(data, dict): raise HanJooCoreError("HanJoo codec probe returned an invalid response")
                     return data
         except HanJooCoreError:
             raise
@@ -148,23 +138,22 @@ class HanJooCoreClient:
     async def source_descriptor(self, enabled: bool = True) -> dict[str, Any]:
         last_error: str | None = None
         try:
+            # Check health first so "container is Running" is not confused with
+            # "protocol service is healthy". A running add-on may still have a
+            # broken/missing codec dependency.
             health = await self.health()
             data = await self._json("GET", f"/v1/source?enabled={'1' if enabled else '0'}")
             if isinstance(data, dict):
                 data["core_available"] = True
                 data["core_health"] = "healthy"
                 data["core_version"] = health.get("version")
+                # The protected gateway ABI remains 0.3.0 internally; the add-on
+                # package version tracks packaging/runtime fixes independently.
                 data["core_package_version"] = "0.5.2"
                 probe_health = await self.probe_health()
-                data["recognition_protocol_count"] = int(
-                    probe_health.get("recognition_coverage") or 0
-                )
-                data["irtxrx_protocol_count"] = int(
-                    probe_health.get("irtxrx_protocols") or 0
-                )
-                data["irremoteesp8266_protocol_count"] = int(
-                    probe_health.get("irremoteesp8266_protocols") or 0
-                )
+                data["recognition_protocol_count"] = int(probe_health.get("recognition_coverage") or 0)
+                data["irtxrx_protocol_count"] = int(probe_health.get("irtxrx_protocols") or 0)
+                data["irremoteesp8266_protocol_count"] = int(probe_health.get("irremoteesp8266_protocols") or 0)
                 data["note_vi"] = (
                     "Core đang hoạt động và có thể tạo/giải mã các protocol IR được hỗ trợ."
                 )
@@ -197,23 +186,16 @@ class HanJooCoreClient:
             "last_error": last_error,
         }
 
-    async def search(
-        self, query: str = "", kind: str | None = None, *, limit: int = 100
-    ) -> list[dict[str, Any]]:
+    async def search(self, query: str = "", kind: str | None = None, *, limit: int = 100) -> list[dict[str, Any]]:
         q = quote(str(query), safe="")
         k = quote(str(kind or ""), safe="")
-        data = await self._json(
-            "GET",
-            f"/v1/search?query={q}&kind={k}&limit={max(1, min(int(limit), 250))}",
-        )
+        data = await self._json("GET", f"/v1/search?query={q}&kind={k}&limit={max(1, min(int(limit), 250))}")
         if not isinstance(data, list):
             raise HanJooCoreError("Core returned an invalid catalog")
         return [dict(item) for item in data if isinstance(item, dict)]
 
     async def profile(self, candidate_id: str) -> dict[str, Any]:
-        data = await self._json(
-            "GET", f"/v1/profile?id={quote(candidate_id, safe='')}"
-        )
+        data = await self._json("GET", f"/v1/profile?id={quote(candidate_id, safe='')}")
         if not isinstance(data, dict):
             raise HanJooCoreError("Core returned an invalid profile")
         return data
@@ -252,9 +234,7 @@ class HanJooCoreClient:
             raise HanJooCoreError("Core returned an invalid identification result")
         return data
 
-    async def decode(
-        self, protocol: dict[str, Any], timings: list[int]
-    ) -> dict[str, Any] | None:
+    async def decode(self, protocol: dict[str, Any], timings: list[int]) -> dict[str, Any] | None:
         data = await self._json(
             "POST",
             "/v1/decode",

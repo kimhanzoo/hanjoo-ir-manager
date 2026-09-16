@@ -36,6 +36,15 @@ PLATFORMS = [
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     hass.data.setdefault(DOMAIN, {})
+    # One-install add-on bootstrap: the add-on adds a harmless `hanjoo_ir:`
+    # YAML key. On the next HA restart we create the single config entry
+    # automatically, so the user does not need HACS + a second setup flow.
+    if DOMAIN in config and not hass.config_entries.async_entries(DOMAIN):
+        hass.async_create_task(
+            hass.config_entries.flow.async_init(
+                DOMAIN, context={"source": "import"}, data={}
+            )
+        )
     return True
 
 

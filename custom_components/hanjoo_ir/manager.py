@@ -44,7 +44,6 @@ from .importers import (
 )
 from .ir_code import code_from_timings, command_from_code
 from .core_client import HanJooCoreClient, HanJooCoreError
-from .raw_protocol_classifier import classify_capture
 
 
 def _slug(value: str) -> str:
@@ -772,15 +771,11 @@ class HanJooIRManager:
         timings = list(code.get("timings") or [])
         quality, quality_message = self._capture_quality(timings)
         total_us = sum(abs(int(value)) for value in timings)
-        protocol_hints = [
-            {
-                "protocol": str(row["family"].get("protocol") or ""),
-                "brand": row["family"].get("brand"),
-                "confidence": round(float(row.get("score") or 0) * 100),
-                "features": row.get("features") or {},
-            }
-            for row in classify_capture(timings)[:2]
-        ]
+        protocol_hints: list[dict[str, Any]] = []
+        try:
+            protocol_hints = await self.core.classify_timings(timings)
+        except HanJooCoreError:
+            protocol_hints = []
         return {
             "frequency": int(code.get("frequency") or DEFAULT_FREQUENCY),
             "timings": timings,

@@ -224,6 +224,75 @@ class HanJooCoreClient:
         except Exception:
             return {}
 
+
+    async def brain_health(self) -> dict[str, Any]:
+        session = async_get_clientsession(self.hass)
+        host = await self._active_host()
+        try:
+            async with asyncio.timeout(4.0):
+                async with session.get(f"http://{host}:8102/health") as response:
+                    data = await response.json(content_type=None)
+                    return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    async def classify_timings(self, timings: list[int]) -> list[dict[str, Any]]:
+        """Ask the protected Core Brain for conservative wire-family hints."""
+        session = async_get_clientsession(self.hass)
+        host = await self._active_host()
+        try:
+            async with asyncio.timeout(6.0):
+                async with session.post(
+                    f"http://{host}:8102/v1/classify",
+                    json={"timings": timings},
+                ) as response:
+                    data = await response.json(content_type=None)
+                    if response.status >= 400:
+                        raise HanJooCoreError(
+                            f"HanJoo Brain classify error {response.status}: "
+                            f"{data.get('error') if isinstance(data, dict) else data}"
+                        )
+                    rows = data.get("matches") if isinstance(data, dict) else None
+                    return [dict(row) for row in rows or [] if isinstance(row, dict)]
+        except HanJooCoreError:
+            raise
+        except (TimeoutError, OSError, ValueError) as err:
+            raise HanJooCoreError("HanJoo Brain classifier is unavailable") from err
+
+    async def fuse_identification(
+        self,
+        captures: list[dict[str, Any]],
+        *,
+        kind_hint: str = "auto",
+        candidates: list[dict[str, Any]] | None = None,
+        profiles: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Delegate protocol-family inference, profile scoring and safety policy to Core Brain."""
+        session = async_get_clientsession(self.hass)
+        host = await self._active_host()
+        payload = {
+            "captures": captures[:6],
+            "kind_hint": kind_hint,
+            "candidates": candidates or [],
+            "profiles": profiles or [],
+        }
+        try:
+            async with asyncio.timeout(20.0):
+                async with session.post(f"http://{host}:8102/v1/fuse", json=payload) as response:
+                    data = await response.json(content_type=None)
+                    if response.status >= 400:
+                        raise HanJooCoreError(
+                            f"HanJoo Brain error {response.status}: "
+                            f"{data.get('error') if isinstance(data, dict) else data}"
+                        )
+                    if not isinstance(data, dict):
+                        raise HanJooCoreError("HanJoo Brain returned an invalid response")
+                    return data
+        except HanJooCoreError:
+            raise
+        except (TimeoutError, OSError, ValueError) as err:
+            raise HanJooCoreError("HanJoo Brain service is unavailable") from err
+
     async def source_descriptor(self, enabled: bool = True) -> dict[str, Any]:
         last_error: str | None = None
         try:
@@ -238,16 +307,23 @@ class HanJooCoreClient:
                 data["core_version"] = health.get("version")
                 # The protected gateway ABI remains 0.3.0 internally; the add-on
                 # package version tracks packaging/runtime fixes independently.
-                data["core_package_version"] = "0.5.2"
+                data["core_package_version"] = health.get("package_version") or health.get("version")
                 probe_health = await self.probe_health()
+                brain_health = await self.brain_health()
                 data["recognition_protocol_count"] = int(probe_health.get("recognition_coverage") or 0)
                 data["irtxrx_protocol_count"] = int(probe_health.get("irtxrx_protocols") or 0)
                 data["irremoteesp8266_protocol_count"] = int(probe_health.get("irremoteesp8266_protocols") or 0)
+                data["brain_available"] = bool(brain_health.get("ok"))
+                data["brain_version"] = brain_health.get("version")
                 data["note_vi"] = (
-                    "Core đang hoạt động và có thể tạo/giải mã các protocol IR được hỗ trợ."
+                    "Core và Brain đang hoạt động; nhận diện, chấm điểm và chính sách khuyến nghị chạy trong add-on."
+                    if brain_health.get("ok") else
+                    "Core đang chạy nhưng Brain nhận diện chưa sẵn sàng."
                 )
                 data["note_en"] = (
-                    "Core is healthy and can generate/decode supported IR protocols."
+                    "Core and Brain are healthy; recognition, scoring and recommendation policy run in the add-on."
+                    if brain_health.get("ok") else
+                    "Core is running but the recognition Brain is not ready."
                 )
                 return data
         except HanJooCoreError as err:

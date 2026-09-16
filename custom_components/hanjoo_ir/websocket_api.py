@@ -25,12 +25,10 @@ from .const import (
     WS_PREFIX,
 )
 from .importers import ProfileImportError
-from .fusion_matcher import profile_candidate, apply_safe_recommendation
 from .ir_code import IRCodeError
 from .manager import HanJooIRManager
 from .online_library import OnlineLibrary, OnlineLibraryError
 from .protocol_engine import ENGINE_SOURCE_ID
-from .raw_protocol_classifier import raw_protocol_candidates
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -876,7 +874,7 @@ async def _exhaustive_codec_candidates(manager, captures: list[dict[str, Any]]) 
 )
 @websocket_api.async_response
 async def ws_fusion_identify(hass, connection, msg) -> None:
-    """Identify a remote by fusing local protocol decoders with matching profiles."""
+    """Thin orchestration layer; all recognition/scoring policy lives in Core Brain."""
     runtime = _runtime(hass)
     if runtime is None:
         connection.send_error(msg["id"], "not_configured", "HanJoo IR chưa được cấu hình")
@@ -887,148 +885,60 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
     if len(captures) < 2:
         connection.send_error(msg["id"], "not_enough_captures", "Cần ít nhất 2 mẫu remote")
         return
-    cleaned = []
-    for capture in captures:
-        cleaned.append({
+
+    cleaned = [
+        {
             "timings": [int(x) for x in list(capture.get("timings") or [])[:20000]],
             "frequency": int(capture.get("frequency") or 38000),
             "expected": dict(capture.get("expected") or {}),
             "label": str(capture.get("label") or "")[:100],
-        })
+        }
+        for capture in captures
+    ]
     kind_hint = str(msg.get("kind_hint") or "auto").strip().lower()
     settings = manager.get_discovery_source_settings()
-    candidates = []
-    errors = []
-    core_result = {}
+    errors: list[dict[str, Any]] = []
 
-    # 1) Protected protocol engine: strongest automatic evidence for stateful A/C.
-    if settings.get("protocol_engine", True) and kind_hint in {"auto", "air_conditioner", "climate"}:
-        try:
-            core_result = await manager.core.identify(cleaned)
-            # Real HA receiver timings are signed, while the codec uses positive
-            # durations. core_client normalizes them. If the registry-level
-            # identify is still empty/weak, independently try every structured
-            # A/C decoder so common LG/Daikin remotes are not missed.
-            if not core_result.get("candidates") or not core_result.get("recommended"):
-                fallback = await _fallback_identify_via_specific_decoders(manager, cleaned)
-                if fallback.get("candidates"):
-                    existing = {str((r.get("candidate") or {}).get("id") or "") for r in core_result.get("candidates") or []}
-                    merged = list(core_result.get("candidates") or [])
-                    for candidate_row in fallback.get("candidates") or []:
-                        cid = str((candidate_row.get("candidate") or {}).get("id") or "")
-                        if cid and cid not in existing:
-                            merged.append(candidate_row)
-                    core_result = dict(core_result)
-                    core_result["candidates"] = merged
-                    core_result["fallback_method"] = "specific_decode"
-            rid = core_result.get("recommended_id")
-            for row0 in core_result.get("candidates") or []:
-                row = dict(row0); c = dict(row.get("candidate") or {})
-                c["source"] = "protocol_engine"; c["kind"] = c.get("kind") or "air_conditioner"
-                row["candidate"] = c
-                row["group_id"] = row.get("group_id") or _protocol_group_id(
-                    {
-                        "engine": c.get("engine"),
-                        "variant": c.get("variant") or c.get("protocol"),
-                    },
-                    c,
-                )
-                row["evidence_sources"] = list(row.get("evidence_sources") or ["hanjoo_protocol"])
-                row["evidence"] = "protocol_decode"
-                row["_core_recommended"] = bool(
-                    row.get("_core_recommended")
-                    or (core_result.get("recommended") and rid and c.get("id") == rid)
-                )
-                candidates.append(row)
-        except Exception as err:
-            errors.append({"source":"protocol_engine","error":str(err)})
+    # Phase 1: Core Brain derives protocol families/brands locally. No matching
+    # algorithm is exposed in this integration.
+    try:
+        preliminary = await manager.core.fuse_identification(
+            cleaned, kind_hint=kind_hint
+        )
+    except Exception as err:
+        _error(connection, msg, err)
+        return
 
-    # Probe the complete local recognition stack for every device type.
-    # This combines structured irtxrx decoders with upstream IRremoteESP8266.
-    if settings.get("protocol_engine", True):
-        try:
-            exhaustive = await _exhaustive_codec_candidates(manager, cleaned)
-            existing_groups = {str(r.get("group_id") or "") for r in candidates}
-            for row in exhaustive:
-                gid = str(row.get("group_id") or "")
-                if gid and gid in existing_groups:
-                    existing = next((x for x in candidates if str(x.get("group_id") or "") == gid), None)
-                    if existing is not None:
-                        old_sources = set(existing.get("evidence_sources") or [])
-                        old_sources.update(row.get("evidence_sources") or [])
-                        existing["evidence_sources"] = sorted(old_sources)
-                        if int(row.get("confidence") or 0) > int(existing.get("confidence") or 0):
-                            preserved_sources = existing["evidence_sources"]
-                            existing.update(row)
-                            existing["evidence_sources"] = preserved_sources
-                    continue
-                candidates.append(row)
-                if gid:
-                    existing_groups.add(gid)
-        except Exception as err:
-            errors.append({"source": "local_recognition_probe", "error": str(err)})
-
-    # 1b) Raw timing-family fallback.  This is deliberately independent of
-    # Core/IRremoteESP8266 so a perfectly clean, common frame can still seed
-    # brand/profile lookup when a compiled decoder misses it.  It never marks a
-    # concrete profile safe by itself.
-    heuristic_candidates = raw_protocol_candidates(cleaned)
-    if heuristic_candidates:
-        existing_groups = {str(r.get("group_id") or "") for r in candidates}
-        for row in heuristic_candidates:
-            gid = str(row.get("group_id") or "")
-            if gid and gid in existing_groups:
-                existing = next((x for x in candidates if str(x.get("group_id") or "") == gid), None)
-                if existing is not None:
-                    sources = set(existing.get("evidence_sources") or [])
-                    sources.update(row.get("evidence_sources") or [])
-                    existing["evidence_sources"] = sorted(sources)
-                    existing.setdefault("timing_diagnostics", row.get("timing_diagnostics"))
-                continue
-            candidates.append(row)
-            if gid:
-                existing_groups.add(gid)
-
-    # 2) Cross-check local saved profiles and online profile libraries.
-    # Generic protocols such as NEC/RC5 identify the wire protocol but often
-    # cannot identify a brand/device by themselves.  Exact RAW matches against
-    # SmartIR/Flipper (especially when the user gives a brand/model hint or a
-    # branded decoder such as Daikin/LG/Panasonic supplies one) provide the
-    # missing evidence.
-    profile_rows_checked = 0
-
+    profile_inputs: list[dict[str, Any]] = []
     for profile in manager.get_profiles().values():
-        try:
-            row = profile_candidate(
-                profile, cleaned, source="saved_profile",
-                candidate_id=f"saved:{profile.get('id')}",
-            )
-            if row is not None:
-                row["group_id"] = row.get("group_id") or f"profile:saved:{profile.get('id')}"
-                candidates.append(row)
-                profile_rows_checked += 1
-        except Exception:
-            continue
+        profile_inputs.append(
+            {
+                "profile": profile,
+                "source": "saved_profile",
+                "candidate_id": f"saved:{profile.get('id')}",
+                "catalog_id": None,
+                "group_id": f"profile:saved:{profile.get('id')}",
+            }
+        )
 
     query_hint = str(msg.get("query_hint") or "").strip()
     online_queries: list[str] = []
     if query_hint:
         online_queries.append(query_hint)
-    # Reuse brand evidence from protocol decoders.  This makes a no-hint A/C
-    # flow useful without blindly downloading an entire Internet corpus.
-    for row in candidates:
-        brand = str((row.get("candidate") or {}).get("brand") or "").strip()
+    for brand in preliminary.get("brand_hints") or []:
+        brand = str(brand or "").strip()
         if brand and brand.lower() not in {q.lower() for q in online_queries}:
             online_queries.append(brand)
-        if len(online_queries) >= 4:
+        if len(online_queries) >= 5:
             break
 
+    online_profiles_checked = 0
     if online is not None and (settings.get("smartir") or settings.get("flipper_irdb")) and online_queries:
         catalog_rows: dict[str, dict[str, Any]] = {}
         search_kind = None if kind_hint in {"", "auto"} else kind_hint
-        for q in online_queries:
+        for query in online_queries:
             try:
-                found = await online.async_search(q, search_kind, limit=40)
+                found = await online.async_search(query, search_kind, limit=40)
                 for item in found.get("items") or []:
                     cid = str(item.get("id") or "")
                     if cid:
@@ -1037,50 +947,63 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
                 errors.append({"source": "online_profile_search", "error": str(err)})
 
         sem = asyncio.Semaphore(6)
-        async def _score_online(item: dict[str, Any]):
-            nonlocal profile_rows_checked
+        async def _fetch_profile(item: dict[str, Any]) -> dict[str, Any] | None:
+            nonlocal online_profiles_checked
             cid = str(item.get("id") or "")
             if not cid:
                 return None
             try:
                 async with sem:
                     imported = await online.async_fetch_profile(cid)
-                profile_rows_checked += 1
-                row = profile_candidate(
-                    imported.profile, cleaned,
-                    source=str(item.get("source") or "online"),
-                    candidate_id=cid, catalog_id=cid,
-                )
-                if row is not None:
-                    row["group_id"] = row.get("group_id") or f"profile:{cid}"
-                return row
-            except Exception:
+                online_profiles_checked += 1
+                return {
+                    "profile": imported.profile,
+                    "source": str(item.get("source") or "online"),
+                    "candidate_id": cid,
+                    "catalog_id": cid,
+                    "group_id": f"profile:{cid}",
+                }
+            except Exception as err:
+                errors.append({"source": "online_profile_fetch", "error": str(err)})
                 return None
 
-        scored = await asyncio.gather(*(_score_online(item) for item in list(catalog_rows.values())[:60]))
-        candidates.extend(row for row in scored if row is not None)
+        fetched = await asyncio.gather(
+            *(_fetch_profile(item) for item in list(catalog_rows.values())[:60])
+        )
+        profile_inputs.extend(item for item in fetched if item is not None)
 
-    result=apply_safe_recommendation(candidates,len(cleaned))
-    for row in result.get("candidates") or []: row.pop("_core_recommended",None)
-    inferred=None
+    try:
+        result = await manager.core.fuse_identification(
+            cleaned,
+            kind_hint=kind_hint,
+            profiles=profile_inputs,
+        )
+    except Exception as err:
+        _error(connection, msg, err)
+        return
+
+    for row in result.get("candidates") or []:
+        row.pop("_core_recommended", None)
+    inferred = None
     if result.get("recommended"):
         for row in result.get("candidates") or []:
-            if (row.get("candidate") or {}).get("id")==result.get("recommended_id"):
-                inferred=(row.get("candidate") or {}).get("kind"); break
-    result.update({
-        "mode":"fusion",
-        "inferred_kind":inferred,
-        "sources_used":{
-            "hanjoo_protocol":bool(settings.get("protocol_engine", True)),
-            "irremoteesp8266":bool(settings.get("protocol_engine", True)),
-            "raw_timing_heuristic":bool(heuristic_candidates),
-            "saved_profile":True,
-            "smartir":bool(settings.get("smartir") and online_queries),
-            "flipper_irdb":bool(settings.get("flipper_irdb") and online_queries),
-        },
-        "online_profiles_checked":profile_rows_checked,
-        "errors":errors[:8],
-    })
+            if (row.get("candidate") or {}).get("id") == result.get("recommended_id"):
+                inferred = (row.get("candidate") or {}).get("kind")
+                break
+    result.update(
+        {
+            "mode": "core_brain",
+            "inferred_kind": inferred,
+            "sources_used": {
+                "hanjoo_core_brain": True,
+                "saved_profile": True,
+                "smartir": bool(settings.get("smartir") and online_queries),
+                "flipper_irdb": bool(settings.get("flipper_irdb") and online_queries),
+            },
+            "online_profiles_checked": online_profiles_checked,
+            "errors": (list(result.get("errors") or []) + errors)[:8],
+        }
+    )
     connection.send_result(msg["id"], result)
 
 

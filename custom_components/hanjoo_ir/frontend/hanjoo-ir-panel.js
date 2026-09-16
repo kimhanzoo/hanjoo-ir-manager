@@ -1,4 +1,4 @@
-/* HanJoo IR Manager v0.5.8 - dependency-free Home Assistant admin panel */
+/* HanJoo IR Manager v0.6.0 - dependency-free Home Assistant admin panel */
 
 // Home Assistant's native device page currently hard-codes its toolbar back path
 // to /config/devices/dashboard. When a device was opened from HanJoo, intercept

@@ -70,7 +70,9 @@ async def _async_register_panel(hass: HomeAssistant) -> None:
     if data.get("_panel_registered"):
         return
 
-    bundle_path = Path(__file__).parent / "frontend" / PANEL_FILENAME
+    frontend_dir = Path(__file__).parent / "frontend"
+    bundle_path = frontend_dir / "hanjoo-ir-panel-v065.js"
+    base_bundle_path = frontend_dir / PANEL_FILENAME
     if not bundle_path.exists():
         _LOGGER.error("HanJoo IR frontend bundle is missing: %s", bundle_path)
         return
@@ -84,7 +86,12 @@ async def _async_register_panel(hass: HomeAssistant) -> None:
                     PANEL_STATIC_PATH,
                     str(bundle_path),
                     cache_headers=False,
-                )
+                ),
+                StaticPathConfig(
+                    f"/{DOMAIN}_panel/hanjoo-ir-panel-base.js",
+                    str(base_bundle_path),
+                    cache_headers=False,
+                ),
             ]
         )
     except RuntimeError:

@@ -5,8 +5,8 @@ if (PanelClass) {
   const proto = PanelClass.prototype;
 
   // Three distinct captures are enough for the current Fusion safety rules.
-  // A/C uses three sequential temperatures so state/checksum changes are still
-  // available to the native decoder and Brain without forcing a fourth press.
+  // For A/C, 24 -> 25 -> 26 C preserves state/checksum changes without asking
+  // for a fourth Power Off press.
   proto.identifySteps = function() {
     if (this._identifyKind === "air_conditioner") return [
       { label: "Cool 24°C", help: this.tr("Đặt remote ở Cool 23°C, sau đó bấm Temp+ một lần để phát Cool 24°C.", "Prepare the remote at Cool 23°C, then press Temp+ once to send Cool 24°C."), expected: { power: true, mode: "cool", temp: 24 } },
@@ -19,7 +19,11 @@ if (PanelClass) {
       projector: ["Power", "Input / Source", "Menu"],
       speaker: ["Power", "Volume +", "Mute"],
     };
-    const labels = byKind[this._identifyKind] || ["Power", this.tr("Nút chức năng thứ hai", "Second function button"), this.tr("Nút chức năng thứ ba", "Third function button")];
+    const labels = byKind[this._identifyKind] || [
+      "Power",
+      this.tr("Nút chức năng thứ hai", "Second function button"),
+      this.tr("Nút chức năng thứ ba", "Third function button"),
+    ];
     return [
       { label: labels[0], help: this.tr(`Khi HanJoo chờ bước 1, nhấn ${labels[0]} trên remote.`, `When HanJoo waits for step 1, press ${labels[0]} on the remote.`), expected: {} },
       { label: labels[1], help: this.tr(`HanJoo tự chuyển sang bước 2; nhấn ${labels[1]}.`, `HanJoo moves to step 2 automatically; press ${labels[1]}.`), expected: {} },
@@ -27,8 +31,8 @@ if (PanelClass) {
     ];
   };
 
-  // Keep the full RAW available for diagnostics without making each capture
-  // several screen-heights tall. Native <details> also works without extra JS.
+  // Keep RAW diagnostics available, but collapse the long timing string by
+  // default so each captured sample stays only one compact row high.
   proto.renderCaptureRecognition = function(cap) {
     const timings = Array.isArray(cap?.timings) ? cap.timings : [];
     const raw = timings.join(" ");
@@ -37,7 +41,13 @@ if (PanelClass) {
     const hintText = hint?.protocol
       ? `<div style="margin-top:6px">${this.tr("Nhận dạng sơ bộ", "Preliminary")}: <b>${this.esc(hint.brand ? `${hint.brand} ${hint.protocol}` : hint.protocol)}</b> ${Number(hint.confidence || 0)}%</div>`
       : "";
-    return `<details class="capture-code-details" style="margin-top:5px"><summary style="cursor:pointer;display:inline-flex;align-items:center;gap:6px;padding:5px 9px;border:1px solid var(--divider-color);border-radius:8px;color:var(--primary-text-color)">${this.tr("Xem mã nhận được", "View received code")}</summary><div class="mono" style="margin-top:7px;padding:9px;border-radius:8px;background:var(--secondary-background-color);white-space:normal;overflow-wrap:anywhere;word-break:break-word"><b>${this.tr("Mã nhận được", "Received code")}:</b> ${freq ? `${Math.round(freq / 1000)} kHz · ` : ""}${this.esc(raw)}${hintText}</div></details>`;
+    return `<div class="capture-code-compact" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:5px">
+      <span style="color:var(--secondary-text-color)"><b>${this.tr("Mã nhận được", "Received code")}</b>${freq ? ` · ${Math.round(freq / 1000)} kHz` : ""}</span>
+      <details class="capture-code-details" style="display:inline-block">
+        <summary style="cursor:pointer;display:inline-flex;align-items:center;padding:4px 9px;border:1px solid var(--divider-color);border-radius:8px;color:var(--primary-text-color);list-style:none">${this.tr("Xem", "View")}</summary>
+        <div class="mono" style="margin-top:7px;padding:9px;border-radius:8px;background:var(--secondary-background-color);white-space:normal;overflow-wrap:anywhere;word-break:break-word;max-height:220px;overflow:auto"><b>${this.tr("Mã nhận được", "Received code")}:</b> ${this.esc(raw)}${hintText}</div>
+      </details>
+    </div>`;
   };
 
   const originalRender = proto.render;
@@ -47,6 +57,7 @@ if (PanelClass) {
       const root = this.shadowRoot;
       if (!root) return;
 
+      // Recognition-only results are evidence, not directly addable devices.
       const recognitionIds = new Set(
         (this._identifyResult?.candidates || [])
           .map(row => row?.candidate)
@@ -57,7 +68,8 @@ if (PanelClass) {
         if (recognitionIds.has(String(button.dataset.identifyAdd || ""))) button.remove();
       });
 
-      // Compact action bar: Start/Continue + Clear + Analyze in one place.
+      // Keep the three primary actions on one line in both VI and EN:
+      // Start/Continue | Clear | Analyze again.
       const actionBar = root.querySelector(".identify-start-actions");
       const reset = root.querySelector("#identify-reset");
       if (reset) reset.textContent = this.tr("Xóa", "Clear");
@@ -66,9 +78,12 @@ if (PanelClass) {
         analyze.remove();
         actionBar.appendChild(analyze);
       }
-      if (actionBar) actionBar.style.justifyContent = "flex-end";
+      if (actionBar) {
+        actionBar.style.justifyContent = "flex-end";
+        actionBar.style.alignItems = "center";
+      }
 
-      // Search by brand/model reuses the user's hint, or the best useful brand/model.
+      // Search by brand/model reuses the user's hint, or the best useful hint.
       const oldSearch = root.querySelector("[data-identify-search]");
       if (oldSearch && oldSearch.dataset.hanjooV065 !== "1") {
         const search = oldSearch.cloneNode(true);

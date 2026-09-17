@@ -19,6 +19,7 @@ from .const import (
     PANEL_TITLE,
     PANEL_URL,
 )
+from . import recognition_bridge as _recognition_bridge  # noqa: F401
 from .manager import HanJooIRManager
 from .online_library import OnlineLibrary
 from .websocket_api import async_register_websocket_commands

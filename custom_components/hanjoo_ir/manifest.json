@@ -1,7 +1,7 @@
 {
   "domain": "hanjoo_ir",
   "name": "HanJoo IR Manager",
-  "version": "0.6.5",
+  "version": "0.6.6",
   "config_flow": true,
   "dependencies": [
     "http",

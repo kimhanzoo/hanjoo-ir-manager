@@ -1,0 +1,14 @@
+{
+  "title": "HanJoo IR Manager",
+  "config": {
+    "step": {
+      "user": {
+        "title": "HanJoo IR Manager",
+        "description": "Create a central infrared device, profile, learning, and automation manager. A HanJoo IR panel will be added to the sidebar."
+      }
+    },
+    "abort": {
+      "already_configured": "HanJoo IR Manager is already configured."
+    }
+  }
+}

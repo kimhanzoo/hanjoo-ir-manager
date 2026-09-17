@@ -83,7 +83,3 @@ The Fusion layer can compare several sources for the same physical remote instea
 ## Updating
 
 Every release bumps the add-on version. Home Assistant then shows **Update** in the Add-on page. Updating the add-on also updates the bundled Manager integration. No uninstall/reinstall is required.
-
-## Recognition workflow in 0.6.4
-
-When HanJoo recognizes only a wire/protocol family, you can replay the captured RAW command immediately to verify the receive/transmit path. HanJoo then automatically uses detected brand/model hints to list testable Protocol Engine, saved, SmartIR and Flipper-IRDB models directly in the identification screen. A RAW replay success does not falsely certify an exact model; exact profiles are confirmed separately by Test before installation.

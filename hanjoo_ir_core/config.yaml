@@ -1,0 +1,19 @@
+name: HanJoo IR Core
+description: Local IR protocol engine with broad remote recognition for HanJoo IR Manager
+version: "0.6.4"
+slug: hanjoo_ir_core
+init: false
+startup: application
+boot: auto
+arch:
+  - amd64
+  - aarch64
+options:
+  install_manager: true
+  auto_update_manager: true
+schema:
+  install_manager: bool
+  auto_update_manager: bool
+
+map:
+  - config:rw

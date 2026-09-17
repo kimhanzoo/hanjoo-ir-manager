@@ -1270,6 +1270,28 @@ class HanJooIRManager:
             raise HomeAssistantError("Không tìm thấy profile")
         return export_hanjoo_profile(profile)
 
+    async def test_raw_capture(
+        self, *, timings: list[int], frequency: int, emitter: str
+    ) -> dict[str, Any]:
+        """Replay one temporary capture without saving it.
+
+        Used by remote identification when Brain knows only the wire family.
+        The IR code validator enforces timing count, duration and carrier limits.
+        """
+        quality, message = self._capture_quality(list(timings or []))
+        if quality == "invalid":
+            raise HomeAssistantError(message or "Tín hiệu RAW không hợp lệ")
+        code = code_from_timings(list(timings), int(frequency or DEFAULT_FREQUENCY))
+        pseudo = {"emitter_entity_ids": [emitter]}
+        await self._send_item(pseudo, {"codes": [code], "send_count": 1})
+        return {
+            "sent": True,
+            "label": "Captured RAW replay",
+            "frequency": int(code.get("frequency") or DEFAULT_FREQUENCY),
+            "timing_count": len(code.get("timings") or []),
+            "test_kind": "captured_raw",
+        }
+
     async def test_protocol_candidate(
         self, candidate_id: str, emitter: str
     ) -> dict[str, Any]:

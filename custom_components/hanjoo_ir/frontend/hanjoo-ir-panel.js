@@ -1,4 +1,4 @@
-/* HanJoo IR Manager v0.6.0 - dependency-free Home Assistant admin panel */
+/* HanJoo IR Manager v0.6.4 - dependency-free Home Assistant admin panel */
 
 // Home Assistant's native device page currently hard-codes its toolbar back path
 // to /config/devices/dashboard. When a device was opened from HanJoo, intercept
@@ -63,6 +63,7 @@ class HanjooIrPanel extends HTMLElement {
     this._identifyAnalyzing = false;
     this._identifyError = "";
     this._identifyVerified = new Set();
+    this._identifyReplayVerified = new Set();
     this._identifyKind = "auto";
     this._identifyQuery = "";
     this._onlineTotal = 0;
@@ -931,7 +932,8 @@ class HanjooIrPanel extends HTMLElement {
     const captured = new Map((this._identifyCaptures || []).map(x => [x.step, x]));
     const r = this._identifyResult;
     const candidates = r?.candidates || [];
-    const sourceLabel = s => s === "protocol_engine" ? "HanJoo Protocol" : s === "raw_timing_heuristic" ? "Raw timing" : this.sourceLabel(s);
+    const profileSuggestions = r?.profile_suggestions || [];
+    const sourceLabel = s => s === "protocol_engine" ? "HanJoo Protocol" : s === "core_brain" ? "HanJoo Brain" : s === "raw_timing_heuristic" ? "Raw timing" : this.sourceLabel(s);
     const usedSourceLabels = Object.entries(r?.sources_used || {}).filter(([, enabled]) => !!enabled).map(([key]) => ({
       hanjoo_protocol: "HanJoo Core",
       irremoteesp8266: "IRremoteESP8266",
@@ -993,12 +995,19 @@ class HanjooIrPanel extends HTMLElement {
               (r.equivalent_candidate_ids || []).includes(c.id)
             );
             const verified = this._identifyVerified?.has(c.id);
-            const canAdd = recommended || verified;
+            const replayVerified = this._identifyReplayVerified?.has(c.id);
+            const canAdd = recommended || verified || !!c.recognition_only;
+            const canTest = !!c.recognition_only || c.source === "protocol_engine" || c.source === "saved_profile" || !!c.catalog_id;
             return `<article class="candidate-card ${recommended ? "recommended" : ""}">
-              <div class="candidate-main"><div class="candidate-title">${recommended ? `<span class="recommend">${this.tr("Khuyên dùng", "Recommended")}</span>` : ""}${verified ? `<span class="recommend verified">${this.tr("Đã xác nhận bằng Test", "Verified by Test")}</span>` : ""}<b>${this.esc(c.brand || this.tr("Không rõ hãng", "Unknown brand"))}</b> ${this.esc(c.model || c.variant || "")}</div>
-              <div class="candidate-meta"><span>${this.esc(kindLabel(c.kind || c.semantic_type))}</span><span>${this.esc(sourceLabel(c.source))}</span><span>${this.tr("Độ tin cậy", "Confidence")} ${Number(x.confidence || 0)}%</span><span>${this.tr("Khớp", "Matched")} ${x.matched_captures || 0}/${x.capture_count || 0}</span>${x.distinct_matches != null ? `<span>${x.distinct_matches} ${this.tr("lệnh khác nhau", "different commands")}</span>` : ""}</div></div>
-              <div class="actions"><button data-identify-test="${this.esc(c.id || "")}">${this.tr("Test", "Test")}</button>${canAdd ? `<button class="primary" data-identify-add="${this.esc(c.id || "")}">${c.recognition_only ? this.tr("Tìm cấu hình tương thích", "Find compatible configuration") : (verified && !recommended ? this.tr("Thêm thiết bị này", "Add this device") : this.tr("Dùng cấu hình này", "Use this configuration"))}</button>` : ""}</div>
+              <div class="candidate-main"><div class="candidate-title">${recommended ? `<span class="recommend">${this.tr("Khuyên dùng", "Recommended")}</span>` : ""}${verified ? `<span class="recommend verified">${this.tr("Đã xác nhận bằng Test", "Verified by Test")}</span>` : ""}${replayVerified ? `<span class="recommend verified">${this.tr("RAW phát lại OK", "RAW replay OK")}</span>` : ""}<b>${this.esc(c.brand || this.tr("Không rõ hãng", "Unknown brand"))}</b> ${this.esc(c.model || c.variant || "")}</div>
+              <div class="candidate-meta"><span>${this.esc(kindLabel(c.kind || c.semantic_type))}</span><span>${this.esc(sourceLabel(c.source))}</span><span>${this.tr("Độ tin cậy", "Confidence")} ${Number(x.confidence || 0)}%</span><span>${this.tr("Khớp", "Matched")} ${x.matched_captures || 0}/${x.capture_count || 0}</span>${x.distinct_matches != null ? `<span>${x.distinct_matches} ${this.tr("lệnh khác nhau", "different commands")}</span>` : ""}</div>${c.recognition_only ? `<div class="muted">${this.tr("Đã nhận diện họ giao thức; Test bên dưới sẽ phát lại chính mã RAW vừa thu, không khẳng định model cụ thể.", "Protocol family detected; the Test below replays the captured RAW code and does not by itself prove an exact model.")}</div>` : ""}</div>
+              <div class="actions">${canTest ? `<button data-identify-test="${this.esc(c.id || "")}">${c.recognition_only ? this.tr("Test mã vừa thu", "Test captured code") : this.tr("Test", "Test")}</button>` : ""}${canAdd ? `<button class="primary" data-identify-add="${this.esc(c.id || "")}">${c.recognition_only ? this.tr("Tìm model/profile tương thích", "Find compatible models/profiles") : (verified && !recommended ? this.tr("Thêm thiết bị này", "Add this device") : this.tr("Dùng cấu hình này", "Use this configuration"))}</button>` : ""}</div>
             </article>`;
+          }).join("")}</div>` : ""}
+          ${profileSuggestions.length ? `<div class="profile-suggestions"><h4>${this.tr("Model/profile có thể thử", "Models/profiles you can try")}</h4><p class="muted">${this.tr("Danh sách này được tìm tự động theo hãng/model mà Brain vừa nhận diện. Đây là gợi ý để Test, chưa được tính là bằng chứng nhận diện.", "This list is searched automatically from the detected brand/model hints. These are testable suggestions, not recognition evidence.")}</p>${profileSuggestions.slice(0,12).map((s) => {
+            const sid = s.id || s.catalog_id || s.profile_id || "";
+            const verified = this._identifyVerified?.has(`suggestion:${sid}`);
+            return `<article class="candidate-card suggestion-card"><div class="candidate-main"><div class="candidate-title">${verified ? `<span class="recommend verified">${this.tr("Đã xác nhận bằng Test", "Verified by Test")}</span>` : ""}<b>${this.esc(s.brand || this.tr("Không rõ hãng", "Unknown brand"))}</b> ${this.esc(s.model || s.name || "")}</div><div class="candidate-meta"><span>${this.esc(kindLabel(s.kind || s.type))}</span><span>${this.esc(sourceLabel(s.source))}</span><span>${this.tr("Gợi ý theo hãng/model", "Brand/model suggestion")}</span></div></div><div class="actions"><button data-identify-suggestion-test="${this.esc(sid)}">${this.tr("Test", "Test")}</button>${verified ? `<button class="primary" data-identify-suggestion-add="${this.esc(sid)}">${this.tr("Dùng profile này", "Use this profile")}</button>` : ""}</div></article>`;
           }).join("")}</div>` : ""}
         </div>` : ""}
       </section>`;
@@ -1590,7 +1599,7 @@ class HanjooIrPanel extends HTMLElement {
       this.render();
     }));
     const identifyKind = q("#identify-kind");
-    if (identifyKind) identifyKind.addEventListener("change", e => { this._identifyKind = e.target.value; this._identifyCaptures = []; this._identifyStepErrors = {}; this._identifyResult = null; this._identifyVerified = new Set(); this._identifyError = ""; this.render(); });
+    if (identifyKind) identifyKind.addEventListener("change", e => { this._identifyKind = e.target.value; this._identifyCaptures = []; this._identifyStepErrors = {}; this._identifyResult = null; this._identifyVerified = new Set(); this._identifyReplayVerified = new Set(); this._identifyReplayVerified = new Set(); this._identifyError = ""; this.render(); });
     const identifyQuery = q("#identify-query");
     if (identifyQuery) identifyQuery.addEventListener("input", e => { this._identifyQuery = e.target.value; });
     const identifyReceiver = q("#identify-receiver");
@@ -1603,9 +1612,11 @@ class HanjooIrPanel extends HTMLElement {
     const identifyAnalyze = q("#identify-analyze");
     if (identifyAnalyze) identifyAnalyze.addEventListener("click", () => this.analyzeRemoteIdentity());
     const identifyReset = q("#identify-reset");
-    if (identifyReset) identifyReset.addEventListener("click", () => { this._identifyCaptures = []; this._identifyStepErrors = {}; this._identifyResult = null; this._identifyVerified = new Set(); this._identifyError = ""; this.render(); });
+    if (identifyReset) identifyReset.addEventListener("click", () => { this._identifyCaptures = []; this._identifyStepErrors = {}; this._identifyResult = null; this._identifyVerified = new Set(); this._identifyReplayVerified = new Set(); this._identifyReplayVerified = new Set(); this._identifyError = ""; this.render(); });
     qa("[data-identify-test]").forEach(el => el.addEventListener("click", () => this.testIdentifiedCandidate(el.dataset.identifyTest)));
     qa("[data-identify-add]").forEach(el => el.addEventListener("click", () => this.addIdentifiedCandidate(el.dataset.identifyAdd)));
+    qa("[data-identify-suggestion-test]").forEach(el => el.addEventListener("click", () => this.testIdentifySuggestion(el.dataset.identifySuggestionTest)));
+    qa("[data-identify-suggestion-add]").forEach(el => el.addEventListener("click", () => this.addIdentifySuggestion(el.dataset.identifySuggestionAdd)));
 
     const identifySearch = q("[data-identify-search]");
     if (identifySearch) identifySearch.addEventListener("click", () => {
@@ -1974,7 +1985,11 @@ class HanjooIrPanel extends HTMLElement {
     try {
       this._busyText = `⏳ Đang phát test ${item.brand || ""} ${item.model || ""}…`; this.render();
       let result;
-      if (item.source === "protocol_engine") result = await this.ws("protocol/test", { candidate_id: item.id, emitter });
+      if (item.recognition_only) {
+        const cap = [...(this._identifyCaptures || [])].filter(x => Array.isArray(x.timings) && x.timings.length >= 6).sort((a,b) => (b.timing_count || b.timings.length) - (a.timing_count || a.timings.length))[0];
+        if (!cap) throw new Error(this.tr("Không còn mẫu RAW hợp lệ để phát lại", "No valid RAW capture is available for replay"));
+        result = await this.ws("remote_identify/test_capture", { emitter, timings: cap.timings, frequency: cap.frequency || 38000 });
+      } else if (item.source === "protocol_engine") result = await this.ws("protocol/test", { candidate_id: item.id, emitter });
       else if (item.source === "saved_profile") result = await this.ws("profile/test", { profile_id: item.profile_id, emitter });
       else if (item.catalog_id) result = await this.ws("online/test", { catalog_id: item.catalog_id, emitter });
       else throw new Error("Ứng viên không có nguồn Test hợp lệ");
@@ -1985,13 +2000,72 @@ class HanjooIrPanel extends HTMLElement {
         `HanJoo just sent the Test code for ${item.brand || ""} ${item.model || ""}. Did the device respond correctly?`
       ));
       if (responded) {
-        this._identifyVerified ??= new Set();
-        this._identifyVerified.add(candidateId);
-        this.render();
-        this.toast(this.tr("Đã xác nhận ứng viên bằng Test. Bạn có thể thêm thiết bị.", "Candidate verified by Test. You can now add the device."));
+        if (item.recognition_only) {
+          this._identifyReplayVerified ??= new Set();
+          this._identifyReplayVerified.add(candidateId);
+          this.render();
+          this.toast(this.tr("Mã RAW vừa thu phát lại thành công. Hãy chọn một model/profile bên dưới để Test chính xác cấu hình.", "The captured RAW code replayed successfully. Choose a model/profile below to test the actual configuration."));
+        } else {
+          this._identifyVerified ??= new Set();
+          this._identifyVerified.add(candidateId);
+          this.render();
+          this.toast(this.tr("Đã xác nhận ứng viên bằng Test. Bạn có thể thêm thiết bị.", "Candidate verified by Test. You can now add the device."));
+        }
       } else {
         this.toast(this.tr("Ứng viên chưa được xác nhận. Hãy thử ứng viên khác.", "Candidate not verified. Try another candidate."), true);
       }
+    } catch (err) { this._busyText = ""; this.render(); this.toast(this.errText(err), true); }
+  }
+
+  identifySuggestion(suggestionId) {
+    return (this._identifyResult?.profile_suggestions || []).find(s => (s.id || s.catalog_id || s.profile_id || "") === suggestionId) || null;
+  }
+
+  async testIdentifySuggestion(suggestionId) {
+    const item = this.identifySuggestion(suggestionId); if (!item) return;
+    const emitter = this._discoverEmitter || this._hardware.emitters[0] || "";
+    if (!emitter) return this.toast(this.tr("Hãy chọn IR Transmitter", "Select an IR Transmitter"), true);
+    try {
+      this._busyText = `⏳ ${this.tr("Đang phát Test", "Testing")} ${item.brand || ""} ${item.model || item.name || ""}…`; this.render();
+      if (item.source === "protocol_engine") await this.ws("protocol/test", { candidate_id: item.id, emitter });
+      else if (item.source === "saved_profile") await this.ws("profile/test", { profile_id: item.profile_id, emitter });
+      else if (item.catalog_id || item.id) await this.ws("online/test", { catalog_id: item.catalog_id || item.id, emitter });
+      else throw new Error(this.tr("Profile này không có nguồn Test hợp lệ", "This profile has no valid test source"));
+      this._busyText = ""; this.render();
+      const responded = window.confirm(this.tr(
+        `HanJoo vừa phát Test ${item.brand || ""} ${item.model || item.name || ""}. Thiết bị có phản hồi đúng không?`,
+        `HanJoo just tested ${item.brand || ""} ${item.model || item.name || ""}. Did the device respond correctly?`
+      ));
+      if (responded) {
+        this._identifyVerified ??= new Set();
+        this._identifyVerified.add(`suggestion:${suggestionId}`);
+        this.render();
+        this.toast(this.tr("Đã xác nhận profile này. Bạn có thể dùng nó để tạo thiết bị.", "This profile is verified. You can now use it to create the device."));
+      }
+    } catch (err) { this._busyText = ""; this.render(); this.toast(this.errText(err), true); }
+  }
+
+  async addIdentifySuggestion(suggestionId) {
+    const item = this.identifySuggestion(suggestionId); if (!item) return;
+    if (!this._identifyVerified?.has(`suggestion:${suggestionId}`)) return this.toast(this.tr("Hãy Test profile này trước.", "Test this profile first."), true);
+    const emitter = this._discoverEmitter || this._hardware.emitters[0] || "";
+    const receiver = this._discoverReceiver || null;
+    if (!emitter) return this.toast(this.tr("Hãy chọn IR Transmitter", "Select an IR Transmitter"), true);
+    const name = [item.brand, item.model || item.name].filter(Boolean).join(" ") || this.tr("Thiết bị IR", "IR device");
+    try {
+      this._busyText = `⏳ ${this.tr("Đang thêm", "Adding")} ${name}…`; this.render();
+      let result;
+      if (item.source === "protocol_engine") {
+        result = await this.ws("device/create_from_protocol", { candidate_id: item.id, name, emitters: [emitter], receiver });
+      } else {
+        let profileId = item.profile_id;
+        if (!profileId) {
+          const installed = await this.ws("online/install", { catalog_id: item.catalog_id || item.id });
+          profileId = installed.profile_id;
+        }
+        result = await this.ws("device/create_from_profile", { profile_id: profileId, name, emitters: [emitter], receiver });
+      }
+      this._busyText = ""; await this.sleep(900); this._identifyCaptures=[]; this._identifyResult=null; this._identifyVerified=new Set(); this._identifyReplayVerified=new Set(); await this.loadAll(); this._tab="devices"; this.render(); this.toast(`${this.tr("Đã thêm thiết bị", "Added device")} ${result.device_id || name}`);
     } catch (err) { this._busyText = ""; this.render(); this.toast(this.errText(err), true); }
   }
 

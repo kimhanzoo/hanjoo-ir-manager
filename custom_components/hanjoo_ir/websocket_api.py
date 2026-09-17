@@ -80,6 +80,7 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
         ws_remote_identify_capture,
         ws_protocol_identify,
         ws_fusion_identify,
+        ws_identify_test_capture,
         ws_protocol_test,
         ws_device_create_from_protocol,
         ws_online_sources,
@@ -933,16 +934,71 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
             break
 
     online_profiles_checked = 0
+    catalog_rows: dict[str, dict[str, Any]] = {}
+    suggestion_rows: dict[str, dict[str, Any]] = {}
+    search_kind = None if kind_hint in {"", "auto"} else kind_hint
+
+    # Reuse the detected brand/model hints to build a browseable list similar
+    # to the normal brand/model search.  These are suggestions, not recognition
+    # evidence, so they never increase confidence or trigger auto-recommendation.
+    for query in online_queries:
+        if settings.get("protocol_engine", True):
+            try:
+                for item0 in await manager.core.search(query, search_kind, limit=30):
+                    item = dict(item0)
+                    cid = str(item.get("id") or "")
+                    if not cid:
+                        continue
+                    item.setdefault("source", "protocol_engine")
+                    item.setdefault("source_name", "HanJoo Protocol")
+                    item["testable"] = True
+                    suggestion_rows.setdefault(f"protocol:{cid}", item)
+            except Exception as err:
+                errors.append({"source": "protocol_suggestion_search", "error": str(err)})
+
+        q_lower = query.lower()
+        for profile in manager.get_profiles().values():
+            text0 = f"{profile.get('brand','')} {profile.get('model','')} {profile.get('name','')}".lower()
+            if q_lower and q_lower not in text0:
+                continue
+            pkind = str(profile.get("kind") or profile.get("type") or "")
+            if search_kind and search_kind not in {pkind, {"air_conditioner":"climate","tv":"media_player"}.get(pkind, pkind)}:
+                aliases = {"air_conditioner":"climate","tv":"media_player"}
+                if aliases.get(search_kind) != pkind:
+                    continue
+            pid = str(profile.get("id") or "")
+            if not pid:
+                continue
+            suggestion_rows.setdefault(
+                f"saved:{pid}",
+                {
+                    "id": f"saved:{pid}",
+                    "profile_id": pid,
+                    "source": "saved_profile",
+                    "source_name": "Profile đã lưu",
+                    "name": profile.get("name"),
+                    "brand": profile.get("brand"),
+                    "model": profile.get("model"),
+                    "kind": pkind,
+                    "testable": True,
+                },
+            )
+
     if online is not None and (settings.get("smartir") or settings.get("flipper_irdb")) and online_queries:
-        catalog_rows: dict[str, dict[str, Any]] = {}
-        search_kind = None if kind_hint in {"", "auto"} else kind_hint
         for query in online_queries:
             try:
                 found = await online.async_search(query, search_kind, limit=40)
-                for item in found.get("items") or []:
+                for item0 in found.get("items") or []:
+                    item = dict(item0)
                     cid = str(item.get("id") or "")
                     if cid:
-                        catalog_rows.setdefault(cid, dict(item))
+                        catalog_rows.setdefault(cid, item)
+                        item["catalog_id"] = cid
+                        item["testable"] = True
+                        item["source_name"] = (
+                            "Flipper-IRDB" if item.get("source") == "flipper_irdb" else "SmartIR"
+                        )
+                        suggestion_rows.setdefault(f"online:{cid}", item)
             except Exception as err:
                 errors.append({"source": "online_profile_search", "error": str(err)})
 
@@ -990,10 +1046,30 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
             if (row.get("candidate") or {}).get("id") == result.get("recommended_id"):
                 inferred = (row.get("candidate") or {}).get("kind")
                 break
+    matched_ids = {str((row.get("candidate") or {}).get("id") or "") for row in result.get("candidates") or []}
+    suggestions: list[dict[str, Any]] = []
+    rank_query = query_hint or (online_queries[0] if online_queries else "")
+    for row0 in suggestion_rows.values():
+        row = dict(row0)
+        cid = str(row.get("id") or row.get("catalog_id") or "")
+        if cid and cid in matched_ids:
+            continue
+        row["suggestion_score"] = _rank_candidate(row, query=rank_query, kind=search_kind)
+        row["recognition_match"] = False
+        suggestions.append(row)
+    suggestions.sort(
+        key=lambda row: (
+            -int(row.get("suggestion_score") or 0),
+            str(row.get("brand") or "").lower(),
+            str(row.get("model") or row.get("name") or "").lower(),
+        )
+    )
+
     result.update(
         {
             "mode": "core_brain",
             "inferred_kind": inferred,
+            "profile_suggestions": suggestions[:16],
             "sources_used": {
                 "hanjoo_core_brain": True,
                 "saved_profile": True,
@@ -1005,6 +1081,39 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
         }
     )
     connection.send_result(msg["id"], result)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{WS_PREFIX}/remote_identify/test_capture",
+        vol.Required("emitter"): str,
+        vol.Required("timings"): vol.All([vol.Coerce(int)], vol.Length(min=6, max=20000)),
+        vol.Optional("frequency", default=38000): vol.All(int, vol.Range(min=20000, max=80000)),
+    }
+)
+@websocket_api.async_response
+async def ws_identify_test_capture(hass, connection, msg) -> None:
+    """Replay one freshly captured RAW command without persisting it.
+
+    This verifies the physical receive/replay path even when recognition has
+    only identified a protocol family and no exact model/profile exists yet.
+    Replaying a capture does *not* prove the inferred family/model itself.
+    """
+    runtime = _runtime(hass)
+    if runtime is None:
+        connection.send_error(msg["id"], "not_configured", "HanJoo IR chưa được cấu hình")
+        return
+    manager, _entry_id = runtime
+    try:
+        result = await manager.test_raw_capture(
+            timings=list(msg.get("timings") or []),
+            frequency=int(msg.get("frequency") or 38000),
+            emitter=msg["emitter"],
+        )
+        connection.send_result(msg["id"], result)
+    except Exception as err:
+        _error(connection, msg, err)
 
 
 @websocket_api.require_admin

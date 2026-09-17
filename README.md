@@ -15,25 +15,15 @@
 
 1. Open **Settings → Add-ons → Add-on Store**.
 2. Open the menu **⋮ → Repositories**.
-3. Add this repository:
-
-   `https://github.com/kimhanzoo/HanJoo_IR_Addon`
-
+3. Add `https://github.com/kimhanzoo/HanJoo_IR_Addon`.
 4. Install **HanJoo IR Core** and start it.
-5. The add-on automatically installs/updates **HanJoo IR Manager** under `/config/custom_components/hanjoo_ir`.
-6. After the first install or whenever the Manager version changes, restart **Home Assistant Core once**.
-7. Open **HanJoo IR** from the Home Assistant sidebar and select your IR transmitter/receiver entities.
+5. The add-on automatically installs/updates this Manager integration.
+6. Restart **Home Assistant Core once** after the first Manager install/update.
+7. Open **HanJoo IR** from the Home Assistant sidebar.
 
-For developers or users who want HACS to own the integration, the separate Manager repository is still available; disable `install_manager` in the add-on options first.
+## Recommended IR bridge configuration
 
-## Hardware
-
-You only need an inexpensive IR bridge. Two common choices are:
-
-- an **ESP32/ESP8266-compatible board** plus an IR LED/transmitter stage and a 38 kHz IR receiver; or
-- a low-cost **Tuya IR blaster using BK7231N** that is compatible with ESPHome/LibreTiny and can be reflashed. Hardware revisions vary, so verify the board/chip/pins before flashing.
-
-Example ESPHome configuration:
+HanJoo follows the same important capture principle used by IRremoteESP8266 `IRrecvDumpV2` and Tasmota: keep a complete physical button press together, especially for A/C remotes that can contain 20–40+ ms gaps between packets.
 
 ```yaml
 remote_transmitter:
@@ -49,16 +39,12 @@ remote_receiver:
     mode:
       input: true
       pullup: true
-  tolerance: 55%
+  tolerance: 25%
   filter: 50us
-  idle: 10ms
-  buffer_size: 2kb
-
-  # Optional for debugging; HanJoo IR Manager does not require this log.
+  idle: 50ms
+  buffer_size: 4kb
   dump: all
 
-# ESPHome 2026.x native IR proxy. Home Assistant creates runtime infrared
-# entities, so learning/sending new codes does not require recompiling firmware.
 infrared:
   - platform: ir_rf_proxy
     name: IR Transmitter
@@ -70,20 +56,21 @@ infrared:
     remote_receiver_id: ir_rx
 ```
 
-**Change GPIO 7 and GPIO 8 to match your hardware.** Once the device appears in Home Assistant as an IR transmitter and receiver, normal learning, device creation, routing, testing, and management are handled by HanJoo IR Manager.
+Change GPIOs to match your hardware. Existing bridges using `idle: 10ms` should be reflashed once with `idle: 50ms` and the larger buffer for best A/C recognition. After that, device management stays in HanJoo IR Manager.
 
-## Recognition priority
+## Does this affect other HanJoo features?
 
-Typical flow:
+- **Search by brand/model is unaffected.** It searches catalogs and profiles, not receiver timing boundaries.
+- **Manual learning remains supported.** HanJoo stores and replays the complete RAW sequence; longer valid inter-packet gaps are preserved.
+- **Simple TV/audio remotes remain supported.** A longer idle may capture repeats if a button is held, but HanJoo treats repeats as one physical capture for recognition.
+- **A/C recognition improves most**, because Daikin, Panasonic, Mitsubishi and other stateful protocols reach the native decoder intact.
 
-`Native Home Assistant → HanJoo Protocol Engine/Brain → SmartIR / Flipper-IRDB → Saved/Learned Custom`
+## Recognition flow
 
-The Fusion layer can compare several sources for the same physical remote instead of trusting the first protocol guess. Automatic recommendations only pass when the evidence clears safety/confidence checks; otherwise HanJoo keeps the user in search/manual-learning mode.
+`Full physical capture → IRremoteESP8266 native A/C decoder → IRAc normalized HVAC state → HanJoo Brain/Fusion → irtxrx → SmartIR / Flipper-IRDB → Saved/Learned Custom`
+
+For stateful A/C protocols, native results are converted to normalized state fields such as power, mode, temperature, fan and swing before they enter Brain. Generic RC/TV matches from a multi-frame climate capture are treated as diagnostics instead of automatic recommendations, reducing false positives such as RC5/RC6.
 
 ## Updating
 
-Every release bumps the add-on version. Home Assistant then shows **Update** in the Add-on page. Updating the add-on also updates the bundled Manager integration. No uninstall/reinstall is required.
-
-## Recognition workflow in 0.6.4
-
-When HanJoo recognizes only a wire/protocol family, you can replay the captured RAW command immediately to verify the receive/transmit path. HanJoo then automatically uses detected brand/model hints to list testable Protocol Engine, saved, SmartIR and Flipper-IRDB models directly in the identification screen. A RAW replay success does not falsely certify an exact model; exact profiles are confirmed separately by Test before installation.
+The normal user updates **HanJoo IR Core** from the Home Assistant Add-on page. No uninstall/reinstall is required.

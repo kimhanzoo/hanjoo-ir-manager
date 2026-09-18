@@ -602,6 +602,82 @@ class HanJooIRManager:
         await self.async_save()
         return device_id
 
+    async def create_device_from_captures(
+        self,
+        *,
+        name: str,
+        kind: str,
+        brand: str | None,
+        protocol: str | None,
+        captures: list[dict[str, Any]],
+        emitters: list[str],
+        receiver: str | None,
+    ) -> str:
+        """Create a usable learned device directly from identification captures.
+
+        This is intentionally for command-based devices (TV/fan/audio/etc).
+        A recognition-only protocol match may be 100% confident at the protocol
+        level without identifying an exact model/profile. In that case HanJoo
+        can still persist the already captured commands as RAW codes and expose
+        a working remote device immediately.
+        """
+        requested_kind = str(kind or "custom").strip().lower()
+        semantic = FALLBACK_KIND_TO_TYPE.get(requested_kind, DEVICE_TYPE_REMOTE)
+        if semantic == DEVICE_TYPE_CLIMATE:
+            # Three guided A/C samples are not a complete climate state table.
+            # Keep them as a generic remote rather than creating a misleading
+            # climate entity.
+            semantic = DEVICE_TYPE_REMOTE
+            requested_kind = "custom"
+
+        commands: dict[str, Any] = {}
+        for index, capture in enumerate(list(captures or [])[:12]):
+            timings = [int(x) for x in list(capture.get("timings") or [])[:20000]]
+            quality, _message = self._capture_quality(timings)
+            if quality == "invalid":
+                continue
+            label = str(capture.get("label") or f"Command {index + 1}").strip() or f"Command {index + 1}"
+            command_id = _slug(label)
+            base = command_id
+            suffix = 2
+            while command_id in commands:
+                command_id = f"{base}_{suffix}"
+                suffix += 1
+            code = code_from_timings(
+                timings,
+                int(capture.get("frequency") or DEFAULT_FREQUENCY),
+            )
+            commands[command_id] = {
+                "name": label,
+                "codes": [code],
+                "send_count": 1,
+            }
+
+        if not commands:
+            raise HomeAssistantError("Không có mã IR hợp lệ để tạo thiết bị")
+
+        clean_brand = str(brand or "").strip() or None
+        clean_protocol = str(protocol or "").strip() or None
+        device_id = self._unique_device_id(name or clean_brand or "IR device")
+        device: dict[str, Any] = {
+            "id": device_id,
+            "name": name.strip() or clean_brand or device_id,
+            "type": semantic,
+            "kind": requested_kind,
+            "brand": clean_brand,
+            "model": None,
+            "protocol": clean_protocol,
+            "source": "identified_raw",
+            "profile_id": None,
+            "emitter_entity_ids": list(dict.fromkeys(emitters)),
+            "receiver_entity_id": receiver,
+            "commands": commands,
+        }
+        self.get_devices()[device_id] = device
+        await self.async_save()
+        return device_id
+
+
     async def create_device_from_profile(
         self,
         *,

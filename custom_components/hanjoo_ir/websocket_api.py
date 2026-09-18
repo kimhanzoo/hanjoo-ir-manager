@@ -358,6 +358,8 @@ def _native_identification_candidates(
     requested_kind = str(kind_hint or "").strip().lower()
     if requested_kind in {"", "auto"}:
         requested_kind = str(detected_kind or "").strip().lower()
+    if requested_kind == "custom":
+        requested_kind = ""
 
     out: list[dict[str, Any]] = []
     for native in NATIVE_INTEGRATIONS:
@@ -365,10 +367,24 @@ def _native_identification_candidates(
         evidence = brand_rows.get(brand.casefold())
         if evidence is None:
             continue
-        if requested_kind and not _kind_matches_native(
-            requested_kind, list(native.get("device_types") or [])
-        ):
+
+        device_types = [str(x).lower() for x in native.get("device_types") or []]
+        if requested_kind and not _kind_matches_native(requested_kind, device_types):
             continue
+
+        # In auto mode, a generic non-A/C protocol often reaches Brain as
+        # kind="custom". If the matching official integration has exactly one
+        # non-A/C device type (e.g. LG/Samsung TV), that type is unambiguous
+        # enough for routing without pretending Core decoded the product model.
+        inferred_native_kind = requested_kind
+        if not inferred_native_kind:
+            evidence_kind = str(evidence.get("kind") or "").strip().lower()
+            if evidence_kind and evidence_kind not in {"custom", "auto"}:
+                inferred_native_kind = evidence_kind
+            else:
+                non_ac_types = [x for x in device_types if x != "air_conditioner"]
+                if len(non_ac_types) == 1:
+                    inferred_native_kind = non_ac_types[0]
 
         confidence = int(evidence.get("confidence") or 0)
         core_id = str(evidence.get("core_candidate_id") or "")
@@ -378,9 +394,7 @@ def _native_identification_candidates(
             and core_id == recommended_id
             and confidence >= 90
         )
-        native_kind = requested_kind or str(evidence.get("kind") or "")
-        if not native_kind:
-            native_kind = (native.get("device_types") or ["custom"])[0]
+        native_kind = inferred_native_kind or (native.get("device_types") or ["custom"])[0]
 
         domain = str(native["domain"])
         installed = len(hass.config_entries.async_entries(domain))

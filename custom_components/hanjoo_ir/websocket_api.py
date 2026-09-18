@@ -1275,9 +1275,50 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
     suggestion_rows: dict[str, dict[str, Any]] = {}
     search_kind = None if kind_hint in {"", "auto"} else kind_hint
 
-    # Reuse the detected brand/model hints to build a browseable list similar
-    # to the normal brand/model search.  These are suggestions, not recognition
-    # evidence, so they never increase confidence or trigger auto-recommendation.
+    # Protocol names are also valuable search keys. This lets a strong
+    # IRremoteESP8266 detection (e.g. COOLIX/DAIKIN216) discover a dynamic
+    # HanJoo Core controller even when the brand text alone is ambiguous.
+    protocol_queries: list[str] = []
+    for prow in preliminary.get("candidates") or []:
+        if not isinstance(prow, dict) or int(prow.get("confidence") or 0) < 70:
+            continue
+        pc = prow.get("candidate") if isinstance(prow.get("candidate"), dict) else {}
+        protocol = str(pc.get("protocol") or pc.get("variant") or "").strip()
+        if protocol and protocol.lower() not in {q.lower() for q in protocol_queries}:
+            protocol_queries.append(protocol)
+        if len(protocol_queries) >= 5:
+            break
+
+    # First look for exact/near-exact dynamic protocol controllers in HanJoo
+    # Core using the protocol names detected by IRremoteESP8266/Brain.
+    if settings.get("protocol_engine", True):
+        for pquery in protocol_queries:
+            try:
+                for item0 in await manager.core.search(
+                    pquery,
+                    search_kind or ("air_conditioner" if kind_hint == "air_conditioner" else None),
+                    limit=40,
+                ):
+                    item = dict(item0)
+                    cid = str(item.get("id") or "")
+                    if not cid:
+                        continue
+                    item.setdefault("source", "protocol_engine")
+                    item.setdefault("source_name", "HanJoo Core")
+                    item["testable"] = True
+                    item["detected_by"] = "IRremoteESP8266"
+                    item["protocol_query"] = pquery
+                    variant = str(item.get("variant") or item.get("protocol") or item.get("model") or "")
+                    item["protocol_exact_match"] = bool(
+                        variant and pquery and variant.casefold() == pquery.casefold()
+                    )
+                    if item["protocol_exact_match"]:
+                        item["high_compatibility"] = True
+                    suggestion_rows.setdefault(f"protocol:{cid}", item)
+            except Exception as err:
+                errors.append({"source": "protocol_exact_search", "error": str(err)})
+
+    # Reuse detected brand/model hints to locate library profiles.
     for query in online_queries:
         if settings.get("protocol_engine", True):
             try:
@@ -1484,6 +1525,10 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
             continue
         row["suggestion_score"] = _rank_candidate(row, query=rank_query, kind=search_kind)
         row["recognition_match"] = False
+        if row.get("protocol_exact_match"):
+            row["suggestion_score"] = int(row.get("suggestion_score") or 0) + 1800
+            row["recognition_match"] = recognition_confidence >= 85
+            row["compatibility_score"] = max(int(row.get("compatibility_score") or 0), recognition_confidence)
 
         raw_match = (
             raw_profile_matches.get(cid)
@@ -1495,6 +1540,7 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
             row["raw_matched_captures"] = int(raw_match.get("matched") or 0)
             row["raw_distinct_commands"] = int(raw_match.get("distinct") or 0)
             row["raw_capture_scores"] = list(raw_match.get("capture_scores") or [])
+            row["state_aware_match"] = bool(raw_match.get("state_aware"))
             if row["raw_match_score"] >= 78 and row["raw_matched_captures"] >= 2:
                 row["recognition_match"] = True
                 row["high_compatibility"] = True
@@ -1526,14 +1572,25 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
         row["recognition_brand_match"] = brand_match
         row["recognition_kind_match"] = kind_match
         row["protocol_hint"] = detected_protocol or None
-        if row.get("recognition_match"):
+        if row.get("recognition_match") and row.get("raw_match_score"):
+            state_note_vi = " theo đúng trạng thái 24/25/26°C" if row.get("state_aware_match") else ""
+            state_note_en = " against the corresponding guided states" if row.get("state_aware_match") else ""
             row["recommendation_reason_vi"] = (
                 f"Mã IR trong thư viện khớp trực tiếp {row.get('raw_match_score', 0)}% "
-                f"với {row.get('raw_matched_captures', 0)}/{len(cleaned)} mẫu đã thu"
+                f"với {row.get('raw_matched_captures', 0)}/{len(cleaned)} mẫu đã thu{state_note_vi}"
             )
             row["recommendation_reason_en"] = (
                 f"Library IR codes directly match {row.get('raw_match_score', 0)}% "
-                f"across {row.get('raw_matched_captures', 0)}/{len(cleaned)} captures"
+                f"across {row.get('raw_matched_captures', 0)}/{len(cleaned)} captures{state_note_en}"
+            )
+        elif row.get("protocol_exact_match") and recognition_confidence >= 85:
+            row["recommendation_reason_vi"] = (
+                f"IRremoteESP8266 đã xác nhận protocol {detected_protocol or row.get('protocol_query')}; "
+                "HanJoo Core có bộ điều khiển động cùng protocol."
+            )
+            row["recommendation_reason_en"] = (
+                f"IRremoteESP8266 confirmed protocol {detected_protocol or row.get('protocol_query')}; "
+                "HanJoo Core provides a dynamic controller for the same protocol."
             )
         elif brand_match and kind_match and recognition_confidence >= 90:
             row["high_compatibility"] = True

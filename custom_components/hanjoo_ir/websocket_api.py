@@ -1208,18 +1208,50 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
                 )
                 result["message"] = result["message_en"]
 
+    best_recognition: dict[str, Any] | None = None
+    recommended_id = str(result.get("recommended_id") or "")
     for row in result.get("candidates") or []:
         row.pop("_core_recommended", None)
         row.pop("_native_priority", None)
+        candidate = row.get("candidate") if isinstance(row.get("candidate"), dict) else {}
+        if str(candidate.get("id") or "") == recommended_id:
+            best_recognition = row
+
+    # A generic wire protocol (e.g. NEC) identifies the transport family, not
+    # the semantic device class. When the guided flow is explicitly TV/fan/etc,
+    # preserve that user-selected class instead of displaying "Custom".
     inferred = None
-    if result.get("recommended"):
+    if best_recognition is not None:
+        inferred = str((best_recognition.get("candidate") or {}).get("kind") or "")
+    if kind_hint not in {"", "auto"} and inferred in {"", "custom", "remote"}:
+        inferred = kind_hint
         for row in result.get("candidates") or []:
-            if (row.get("candidate") or {}).get("id") == result.get("recommended_id"):
-                inferred = (row.get("candidate") or {}).get("kind")
-                break
+            candidate = row.get("candidate") if isinstance(row.get("candidate"), dict) else {}
+            if candidate.get("recognition_only") and str(candidate.get("kind") or "") in {"", "custom", "remote"}:
+                candidate["kind"] = kind_hint
+
+    best_candidate = (best_recognition or {}).get("candidate") if isinstance((best_recognition or {}).get("candidate"), dict) else {}
+    detected_brand = str(best_candidate.get("brand") or "").strip()
+    recognition_confidence = int((best_recognition or {}).get("confidence") or 0)
+    detected_protocol = str(best_candidate.get("protocol") or best_candidate.get("variant") or "").strip()
+
     matched_ids = {str((row.get("candidate") or {}).get("id") or "") for row in result.get("candidates") or []}
     suggestions: list[dict[str, Any]] = []
     rank_query = query_hint or (online_queries[0] if online_queries else "")
+
+    def _kind_compatible(value: Any) -> bool:
+        if not inferred or inferred in {"auto", "custom"}:
+            return True
+        actual = str(value or "").lower()
+        aliases = {
+            "tv": {"tv", "media_player"},
+            "speaker": {"speaker", "soundbar", "media_player"},
+            "projector": {"projector", "media_player"},
+            "air_conditioner": {"air_conditioner", "climate"},
+            "fan": {"fan"},
+        }
+        return actual in aliases.get(str(inferred).lower(), {str(inferred).lower()})
+
     for row0 in suggestion_rows.values():
         row = dict(row0)
         cid = str(row.get("id") or row.get("catalog_id") or "")
@@ -1227,9 +1259,51 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
             continue
         row["suggestion_score"] = _rank_candidate(row, query=rank_query, kind=search_kind)
         row["recognition_match"] = False
+
+        row_brand = str(row.get("brand") or "").strip()
+        brand_match = bool(
+            detected_brand and row_brand
+            and row_brand.casefold() == detected_brand.casefold()
+        )
+        kind_match = _kind_compatible(row.get("kind") or row.get("type"))
+        model_text = str(row.get("model") or row.get("name") or "").strip()
+        query_match = bool(
+            query_hint and model_text
+            and str(query_hint).casefold() in model_text.casefold()
+        )
+
+        compatibility = 0
+        if brand_match:
+            compatibility += 55
+        if kind_match:
+            compatibility += 25
+        if recognition_confidence >= 90:
+            compatibility += 10
+        if query_match:
+            compatibility += 10
+        row["compatibility_score"] = min(100, compatibility)
+        row["recognition_brand_match"] = brand_match
+        row["recognition_kind_match"] = kind_match
+        row["protocol_hint"] = detected_protocol or None
+        if brand_match and kind_match and recognition_confidence >= 90:
+            row["high_compatibility"] = True
+            row["suggestion_score"] = int(row.get("suggestion_score") or 0) + 500
+            row["recommendation_reason_vi"] = (
+                f"Cùng hãng {detected_brand}"
+                + (f", loại {inferred}" if inferred else "")
+                + (f"; remote đã xác nhận protocol {detected_protocol}" if detected_protocol else "")
+            )
+            row["recommendation_reason_en"] = (
+                f"Same brand {detected_brand}"
+                + (f", device type {inferred}" if inferred else "")
+                + (f"; the remote confirmed protocol {detected_protocol}" if detected_protocol else "")
+            )
         suggestions.append(row)
+
     suggestions.sort(
         key=lambda row: (
+            -int(bool(row.get("high_compatibility"))),
+            -int(row.get("compatibility_score") or 0),
             -int(row.get("suggestion_score") or 0),
             str(row.get("brand") or "").lower(),
             str(row.get("model") or row.get("name") or "").lower(),
@@ -1244,6 +1318,24 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
             "sources_used": {
                 "native_ha": bool(settings.get("native_ha") and native_identified),
                 "hanjoo_core_brain": True,
+                "irremoteesp8266": any(
+                    "irremoteesp8266" in (row.get("evidence_sources") or [])
+                    for row in result.get("candidates") or []
+                ),
+                "saved_profile": any(
+                    str((row.get("candidate") or {}).get("source") or "") == "saved_profile"
+                    for row in result.get("candidates") or []
+                ),
+                "smartir": any(
+                    str((row.get("candidate") or {}).get("source") or "") == "smartir"
+                    for row in result.get("candidates") or []
+                ),
+                "flipper_irdb": any(
+                    str((row.get("candidate") or {}).get("source") or "") == "flipper_irdb"
+                    for row in result.get("candidates") or []
+                ),
+            },
+            "search_sources": {
                 "saved_profile": True,
                 "smartir": bool(settings.get("smartir") and online_queries),
                 "flipper_irdb": bool(settings.get("flipper_irdb") and online_queries),

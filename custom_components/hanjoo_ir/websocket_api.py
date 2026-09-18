@@ -1605,6 +1605,12 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
                 + (f", device type {inferred}" if inferred else "")
                 + (f"; the remote confirmed protocol {detected_protocol}" if detected_protocol else "")
             )
+        row["source_priority"] = {
+            "protocol_engine": 500,
+            "smartir": 400,
+            "flipper_irdb": 300,
+            "saved_profile": 200,
+        }.get(str(row.get("source") or ""), 100)
         suggestions.append(row)
 
     suggestions.sort(
@@ -1614,6 +1620,7 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
             -int(bool(row.get("high_compatibility"))),
             -int(row.get("compatibility_score") or 0),
             -int(row.get("suggestion_score") or 0),
+            -int(row.get("source_priority") or 0),
             str(row.get("brand") or "").lower(),
             str(row.get("model") or row.get("name") or "").lower(),
         )

@@ -839,6 +839,124 @@ def _decoded_signature(decoded: dict[str, Any]) -> tuple[Any, ...]:
     return tuple(decoded.get(k) for k in ("power", "mode", "temp", "fan", "swing"))
 
 
+def _timing_frames(values: list[int]) -> list[list[int]]:
+    """Return full/raw sections suitable for library-code comparison."""
+    clean = [abs(int(v)) for v in values if int(v) != 0]
+    if not clean:
+        return []
+    variants: list[list[int]] = []
+
+    def add(seq: list[int]) -> None:
+        seq = list(seq)
+        while seq and seq[-1] >= 20_000:
+            seq = seq[:-1]
+        if len(seq) >= 8 and seq not in variants:
+            variants.append(seq)
+
+    add(clean)
+    start = 0
+    for idx, value in enumerate(clean):
+        if value >= 6_500 and idx - start >= 8:
+            add(clean[start:idx])
+            start = idx + 1
+    if len(clean) - start >= 8:
+        add(clean[start:])
+    return variants[:8]
+
+
+def _timing_similarity(left: list[int], right: list[int]) -> float:
+    """Robust 0..1 similarity for already-normalized IR timing sequences."""
+    best = 0.0
+    for a in _timing_frames(left):
+        for b in _timing_frames(right):
+            if not a or not b:
+                continue
+            n1, n2 = len(a), len(b)
+            ratio = min(n1, n2) / max(n1, n2)
+            if ratio < 0.82:
+                continue
+            n = min(n1, n2)
+            pulse_score = 0.0
+            for x, y in zip(a[:n], b[:n]):
+                hi = max(x, y)
+                lo = min(x, y)
+                if hi <= 0:
+                    continue
+                r = lo / hi
+                if r >= 0.86:
+                    pulse_score += 1.0
+                elif r >= 0.72:
+                    pulse_score += 0.75
+                elif r >= 0.58:
+                    pulse_score += 0.40
+            score = (pulse_score / n) * ratio
+            if score > best:
+                best = score
+    return max(0.0, min(1.0, best))
+
+
+def _iter_profile_codes(profile: dict[str, Any]):
+    for command_id, item in (profile.get("commands") or {}).items():
+        if not isinstance(item, dict):
+            continue
+        for code in item.get("codes") or []:
+            if isinstance(code, dict) and isinstance(code.get("timings"), list):
+                yield str(command_id), code["timings"]
+
+    climate = profile.get("climate") or {}
+    for key in ("off", "on"):
+        item = climate.get(key)
+        if isinstance(item, dict):
+            for code in item.get("codes") or []:
+                if isinstance(code, dict) and isinstance(code.get("timings"), list):
+                    yield f"climate:{key}", code["timings"]
+    for idx, cell in enumerate(climate.get("cells") or []):
+        if not isinstance(cell, dict):
+            continue
+        key = "climate:" + ":".join(
+            str(cell.get(k) if cell.get(k) is not None else "")
+            for k in ("mode", "temp", "fan", "swing")
+        )
+        for code in cell.get("codes") or []:
+            if isinstance(code, dict) and isinstance(code.get("timings"), list):
+                yield key or f"climate:{idx}", code["timings"]
+
+
+def _profile_raw_match(profile: dict[str, Any], captures: list[dict[str, Any]]) -> dict[str, Any]:
+    """Score a library profile using the actual captured IR timings."""
+    library_codes = list(_iter_profile_codes(profile))
+    if not library_codes or not captures:
+        return {"score": 0, "matched": 0, "distinct": 0}
+
+    best_rows: list[tuple[float, str]] = []
+    for capture in captures:
+        timings = list(capture.get("timings") or [])
+        best_score = 0.0
+        best_command = ""
+        for command_id, code_timings in library_codes:
+            score = _timing_similarity(timings, code_timings)
+            if score > best_score:
+                best_score = score
+                best_command = command_id
+        best_rows.append((best_score, best_command))
+
+    accepted = [(score, cmd) for score, cmd in best_rows if score >= 0.72]
+    matched = len(accepted)
+    distinct = len({cmd for _score, cmd in accepted if cmd})
+    if not accepted:
+        return {"score": 0, "matched": 0, "distinct": 0}
+
+    mean = sum(score for score, _cmd in accepted) / len(accepted)
+    coverage = matched / len(captures)
+    score = round(100 * (0.72 * mean + 0.28 * coverage))
+    return {
+        "score": max(0, min(100, score)),
+        "matched": matched,
+        "distinct": distinct,
+        "capture_scores": [round(s * 100) for s, _cmd in best_rows],
+    }
+
+
 async def _fallback_identify_via_specific_decoders(manager, captures: list[dict[str, Any]]) -> dict[str, Any]:
     """Cross-check every structured A/C candidate with its specific decoder.
 
@@ -1067,6 +1185,22 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
         if len(online_queries) >= 5:
             break
 
+    # Do not rely only on the single leading brand hint. Strong secondary
+    # native/Brain candidates are useful for locating library profiles whose
+    # actual IR codes can then be compared against the captures.
+    if len(online_queries) < 5:
+        for prow in preliminary.get("candidates") or []:
+            pc = prow.get("candidate") if isinstance(prow, dict) else {}
+            if not isinstance(pc, dict):
+                continue
+            if int(prow.get("confidence") or 0) < 70:
+                continue
+            brand = str(pc.get("brand") or "").strip()
+            if brand and brand.lower() not in {q.lower() for q in online_queries}:
+                online_queries.append(brand)
+            if len(online_queries) >= 5:
+                break
+
     online_profiles_checked = 0
     catalog_rows: dict[str, dict[str, Any]] = {}
     suggestion_rows: dict[str, dict[str, Any]] = {}
@@ -1161,6 +1295,27 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
             *(_fetch_profile(item) for item in list(catalog_rows.values())[:60])
         )
         profile_inputs.extend(item for item in fetched if item is not None)
+
+    # Compare the received RAW codes against every profile we actually loaded.
+    # This turns the library into recognition evidence instead of merely a
+    # brand/model text search. Results are attached to the catalog suggestion
+    # rows and later ranked above text-only suggestions.
+    raw_profile_matches: dict[str, dict[str, Any]] = {}
+    for pin in profile_inputs:
+        profile = pin.get("profile") if isinstance(pin, dict) else None
+        if not isinstance(profile, dict):
+            continue
+        match = _profile_raw_match(profile, cleaned)
+        if int(match.get("matched") or 0) < 1:
+            continue
+        keys = [
+            str(pin.get("candidate_id") or ""),
+            str(pin.get("catalog_id") or ""),
+            str(profile.get("id") or ""),
+        ]
+        for key in keys:
+            if key:
+                raw_profile_matches[key] = match
 
     try:
         result = await manager.core.fuse_identification(
@@ -1261,6 +1416,22 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
         row["suggestion_score"] = _rank_candidate(row, query=rank_query, kind=search_kind)
         row["recognition_match"] = False
 
+        raw_match = (
+            raw_profile_matches.get(cid)
+            or raw_profile_matches.get(str(row.get("catalog_id") or ""))
+            or raw_profile_matches.get(str(row.get("profile_id") or ""))
+        )
+        if raw_match:
+            row["raw_match_score"] = int(raw_match.get("score") or 0)
+            row["raw_matched_captures"] = int(raw_match.get("matched") or 0)
+            row["raw_distinct_commands"] = int(raw_match.get("distinct") or 0)
+            row["raw_capture_scores"] = list(raw_match.get("capture_scores") or [])
+            if row["raw_match_score"] >= 78 and row["raw_matched_captures"] >= 2:
+                row["recognition_match"] = True
+                row["high_compatibility"] = True
+                # Real code similarity is stronger than a brand-name hit.
+                row["suggestion_score"] = int(row.get("suggestion_score") or 0) + 2000
+
         row_brand = str(row.get("brand") or "").strip()
         brand_match = bool(
             detected_brand and row_brand
@@ -1286,7 +1457,16 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
         row["recognition_brand_match"] = brand_match
         row["recognition_kind_match"] = kind_match
         row["protocol_hint"] = detected_protocol or None
-        if brand_match and kind_match and recognition_confidence >= 90:
+        if row.get("recognition_match"):
+            row["recommendation_reason_vi"] = (
+                f"Mã IR trong thư viện khớp trực tiếp {row.get('raw_match_score', 0)}% "
+                f"với {row.get('raw_matched_captures', 0)}/{len(cleaned)} mẫu đã thu"
+            )
+            row["recommendation_reason_en"] = (
+                f"Library IR codes directly match {row.get('raw_match_score', 0)}% "
+                f"across {row.get('raw_matched_captures', 0)}/{len(cleaned)} captures"
+            )
+        elif brand_match and kind_match and recognition_confidence >= 90:
             row["high_compatibility"] = True
             row["suggestion_score"] = int(row.get("suggestion_score") or 0) + 500
             row["recommendation_reason_vi"] = (
@@ -1303,6 +1483,8 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
 
     suggestions.sort(
         key=lambda row: (
+            -int(bool(row.get("recognition_match"))),
+            -int(row.get("raw_match_score") or 0),
             -int(bool(row.get("high_compatibility"))),
             -int(row.get("compatibility_score") or 0),
             -int(row.get("suggestion_score") or 0),

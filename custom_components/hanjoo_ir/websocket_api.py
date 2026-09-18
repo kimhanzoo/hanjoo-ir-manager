@@ -92,6 +92,7 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
         ws_devices,
         ws_device,
         ws_device_create_custom,
+        ws_device_create_from_captures,
         ws_device_create_from_profile,
         ws_device_delete,
         ws_device_update_routing,
@@ -1674,6 +1675,42 @@ async def ws_device_create_custom(hass, connection, msg) -> None:
         device_id = await manager.create_custom_device(
             name=msg["name"],
             kind=msg["kind"],
+            emitters=msg["emitters"],
+            receiver=msg.get("receiver"),
+        )
+        connection.send_result(msg["id"], {"device_id": device_id})
+        _reload_soon(hass, entry_id)
+    except Exception as err:
+        _error(connection, msg, err)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{WS_PREFIX}/device/create_from_captures",
+        vol.Required("name"): str,
+        vol.Required("kind"): str,
+        vol.Optional("brand"): vol.Any(str, None),
+        vol.Optional("protocol"): vol.Any(str, None),
+        vol.Required("captures"): [dict],
+        vol.Required("emitters"): [str],
+        vol.Optional("receiver"): vol.Any(str, None),
+    }
+)
+@websocket_api.async_response
+async def ws_device_create_from_captures(hass, connection, msg) -> None:
+    runtime = _runtime(hass)
+    if runtime is None:
+        connection.send_error(msg["id"], "not_configured", "HanJoo IR chưa được cấu hình")
+        return
+    manager, entry_id = runtime
+    try:
+        device_id = await manager.create_device_from_captures(
+            name=msg["name"],
+            kind=msg["kind"],
+            brand=msg.get("brand"),
+            protocol=msg.get("protocol"),
+            captures=list(msg.get("captures") or []),
             emitters=msg["emitters"],
             receiver=msg.get("receiver"),
         )

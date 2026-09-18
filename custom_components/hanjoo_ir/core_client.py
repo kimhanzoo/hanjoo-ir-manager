@@ -20,6 +20,25 @@ from .const import CORE_API_VERSION, CORE_BASE_URL, CORE_REQUEST_TIMEOUT
 
 
 
+def _probe_timings(values: list[int]) -> list[int]:
+    """Preserve signed mark/space timings for the recognition sidecar.
+
+    Positive values are marks and negative values are spaces. Keeping polarity
+    lets the sidecar reject a leading idle-space and preserve the native decoder
+    phase instead of inferring mark/space solely from array index parity.
+    """
+    out: list[int] = []
+    for value in values:
+        try:
+            usec = int(value)
+        except (TypeError, ValueError):
+            continue
+        if usec == 0:
+            continue
+        out.append(usec)
+    return out
+
+
 def _codec_timings(values: list[int]) -> list[int]:
     """Convert Home Assistant signed mark/space timings to codec durations.
 
@@ -180,7 +199,7 @@ class HanJooCoreClient:
         url = f"http://{host}:8101/v1/probe"
         try:
             async with asyncio.timeout(8.0):
-                async with session.post(url, json={"timings": _codec_timings(timings)}) as response:
+                async with session.post(url, json={"timings": _probe_timings(timings)}) as response:
                     data = await response.json(content_type=None)
                     if response.status >= 400:
                         raise HanJooCoreError(
@@ -203,7 +222,7 @@ class HanJooCoreClient:
         host = await self._active_host()
         try:
             async with asyncio.timeout(10.0):
-                async with session.post(f"http://{host}:8101/v1/probe-all", json={"timings": _codec_timings(timings)}) as response:
+                async with session.post(f"http://{host}:8101/v1/probe-all", json={"timings": _probe_timings(timings)}) as response:
                     data = await response.json(content_type=None)
                     if response.status >= 400: raise HanJooCoreError(f"HanJoo codec probe error {response.status}: {data}")
                     if not isinstance(data, dict): raise HanJooCoreError("HanJoo codec probe returned an invalid response")

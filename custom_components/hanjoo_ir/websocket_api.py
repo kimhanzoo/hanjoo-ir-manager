@@ -922,14 +922,79 @@ def _iter_profile_codes(profile: dict[str, Any]):
                 yield key or f"climate:{idx}", code["timings"]
 
 
+def _profile_codes_for_capture(
+    profile: dict[str, Any], capture: dict[str, Any]
+) -> tuple[list[tuple[str, list[int]]], bool]:
+    """Return library codes relevant to one guided capture.
+
+    For climate identification, 24/25/26 C samples must be compared against the
+    corresponding state cells rather than against any arbitrary code in the
+    profile. This prevents several models that share a wire family from all
+    appearing as a misleading 100% match.
+    """
+    expected = dict(capture.get("expected") or {})
+    climate = profile.get("climate") if isinstance(profile.get("climate"), dict) else None
+    if not climate or not expected:
+        return list(_iter_profile_codes(profile)), False
+
+    rows: list[tuple[str, list[int]]] = []
+    power = expected.get("power")
+    if power is False:
+        item = climate.get("off")
+        if isinstance(item, dict):
+            for code in item.get("codes") or []:
+                if isinstance(code, dict) and isinstance(code.get("timings"), list):
+                    rows.append(("climate:off", code["timings"]))
+        return (rows or list(_iter_profile_codes(profile))), bool(rows)
+
+    wanted_mode = expected.get("mode")
+    wanted_temp = expected.get("temp")
+    wanted_fan = expected.get("fan")
+    wanted_swing = expected.get("swing")
+
+    for idx, cell in enumerate(climate.get("cells") or []):
+        if not isinstance(cell, dict):
+            continue
+        if wanted_mode is not None and cell.get("mode") is not None:
+            if str(cell.get("mode")).lower() != str(wanted_mode).lower():
+                continue
+        if wanted_temp is not None:
+            if cell.get("temp") is None:
+                continue
+            try:
+                if abs(float(cell.get("temp")) - float(wanted_temp)) > 0.51:
+                    continue
+            except (TypeError, ValueError):
+                continue
+        if wanted_fan is not None and cell.get("fan") is not None:
+            if str(cell.get("fan")).lower() != str(wanted_fan).lower():
+                continue
+        if wanted_swing is not None and cell.get("swing") is not None:
+            if str(cell.get("swing")).lower() != str(wanted_swing).lower():
+                continue
+        key = "climate:" + ":".join(
+            str(cell.get(k) if cell.get(k) is not None else "")
+            for k in ("mode", "temp", "fan", "swing")
+        )
+        for code in cell.get("codes") or []:
+            if isinstance(code, dict) and isinstance(code.get("timings"), list):
+                rows.append((key or f"climate:{idx}", code["timings"]))
+
+    # If a third-party profile lacks enough state metadata, retain it as a
+    # weaker generic candidate instead of silently discarding the source.
+    return (rows or list(_iter_profile_codes(profile))), bool(rows)
+
+
 def _profile_raw_match(profile: dict[str, Any], captures: list[dict[str, Any]]) -> dict[str, Any]:
-    """Score a library profile using the actual captured IR timings."""
-    library_codes = list(_iter_profile_codes(profile))
-    if not library_codes or not captures:
+    """Score a library profile using actual received codes and guided state."""
+    if not captures:
         return {"score": 0, "matched": 0, "distinct": 0}
 
     best_rows: list[tuple[float, str]] = []
+    state_aware_count = 0
     for capture in captures:
+        library_codes, state_aware = _profile_codes_for_capture(profile, capture)
+        state_aware_count += int(state_aware)
         timings = list(capture.get("timings") or [])
         best_score = 0.0
         best_command = ""
@@ -944,7 +1009,10 @@ def _profile_raw_match(profile: dict[str, Any], captures: list[dict[str, Any]]) 
     matched = len(accepted)
     distinct = len({cmd for _score, cmd in accepted if cmd})
     if not accepted:
-        return {"score": 0, "matched": 0, "distinct": 0}
+        return {
+            "score": 0, "matched": 0, "distinct": 0,
+            "state_aware": state_aware_count == len(captures),
+        }
 
     mean = sum(score for score, _cmd in accepted) / len(accepted)
     coverage = matched / len(captures)
@@ -954,6 +1022,7 @@ def _profile_raw_match(profile: dict[str, Any], captures: list[dict[str, Any]]) 
         "matched": matched,
         "distinct": distinct,
         "capture_scores": [round(s * 100) for s, _cmd in best_rows],
+        "state_aware": state_aware_count == len(captures),
     }
 
 

@@ -1001,7 +1001,7 @@ class HanjooIrPanel extends HTMLElement {
             return `<article class="candidate-card ${recommended ? "recommended" : ""}">
               <div class="candidate-main"><div class="candidate-title">${recommended ? `<span class="recommend">${this.tr("Khuyên dùng", "Recommended")}</span>` : ""}${verified ? `<span class="recommend verified">${this.tr("Đã xác nhận bằng Test", "Verified by Test")}</span>` : ""}${replayVerified ? `<span class="recommend verified">${this.tr("RAW phát lại OK", "RAW replay OK")}</span>` : ""}<b>${this.esc(c.brand || this.tr("Không rõ hãng", "Unknown brand"))}</b> ${this.esc(c.model || c.variant || "")}</div>
               <div class="candidate-meta"><span>${this.esc(kindLabel(c.kind || c.semantic_type))}</span><span>${this.esc(sourceLabel(c.source))}</span><span>${this.tr("Độ tin cậy", "Confidence")} ${Number(x.confidence || 0)}%</span><span>${this.tr("Khớp", "Matched")} ${x.matched_captures || 0}/${x.capture_count || 0}</span>${x.distinct_matches != null ? `<span>${x.distinct_matches} ${this.tr("lệnh khác nhau", "different commands")}</span>` : ""}</div>${c.recognition_only ? `<div class="muted">${this.tr("Đã nhận diện họ giao thức; Test bên dưới sẽ phát lại chính mã RAW vừa thu, không khẳng định model cụ thể.", "Protocol family detected; the Test below replays the captured RAW code and does not by itself prove an exact model.")}</div>` : ""}</div>
-              <div class="actions">${canTest ? `<button data-identify-test="${this.esc(c.id || "")}">${c.recognition_only ? this.tr("Test mã vừa thu", "Test captured code") : this.tr("Test", "Test")}</button>` : ""}${canAdd ? `<button class="primary" data-identify-add="${this.esc(c.id || "")}">${c.recognition_only ? this.tr("Tìm model/profile tương thích", "Find compatible models/profiles") : (verified && !recommended ? this.tr("Thêm thiết bị này", "Add this device") : this.tr("Dùng cấu hình này", "Use this configuration"))}</button>` : ""}</div>
+              <div class="actions">${canTest ? `<button data-identify-test="${this.esc(c.id || "")}">${c.recognition_only ? this.tr("Test mã vừa thu", "Test captured code") : this.tr("Test", "Test")}</button>` : ""}${canAdd ? `<button class="primary" data-identify-add="${this.esc(c.id || "")}">${c.source === "native_ha" ? (Number(c.installed_entries || 0) > 0 ? this.tr("Mở integration Native HA", "Open Native HA integration") : this.tr("Thiết lập Native HA", "Set up Native HA")) : (c.recognition_only ? this.tr("Tìm model/profile tương thích", "Find compatible models/profiles") : (verified && !recommended ? this.tr("Thêm thiết bị này", "Add this device") : this.tr("Dùng cấu hình này", "Use this configuration")))}</button>` : ""}</div>
             </article>`;
           }).join("")}</div>` : ""}
           ${profileSuggestions.length ? `<div class="profile-suggestions"><h4>${this.tr("Model/profile có thể thử", "Models/profiles you can try")}</h4><p class="muted">${this.tr("Danh sách này được tìm tự động theo hãng/model mà Brain vừa nhận diện. Đây là gợi ý để Test, chưa được tính là bằng chứng nhận diện.", "This list is searched automatically from the detected brand/model hints. These are testable suggestions, not recognition evidence.")}</p>${profileSuggestions.slice(0,12).map((s) => {
@@ -2077,6 +2077,17 @@ class HanjooIrPanel extends HTMLElement {
     ));
     const verified = !!this._identifyVerified?.has(candidateId);
     const candidateMeta = (r?.candidates || []).find(x => x?.candidate?.id === candidateId)?.candidate || {};
+    if (candidateMeta.source === "native_ha" || candidateMeta.action === "native") {
+      const domain = candidateMeta.native_domain || "";
+      if (!domain) return this.toast(this.tr("Không xác định được integration Native HA.", "Unable to determine the Native HA integration."), true);
+      const installed = Number(candidateMeta.installed_entries || 0);
+      this.navigateInHomeAssistant(
+        installed > 0
+          ? `/config/integrations/integration/${encodeURIComponent(domain)}`
+          : `/config/integrations/dashboard/add?domain=${encodeURIComponent(domain)}`
+      );
+      return;
+    }
     if (candidateMeta.recognition_only) {
       this._discoverQuery = candidateMeta.brand || candidateMeta.model || "";
       this._addMode = "search"; this._discoverLoaded = false; this.render();

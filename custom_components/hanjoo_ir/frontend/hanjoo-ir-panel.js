@@ -943,6 +943,13 @@ class HanjooIrPanel extends HTMLElement {
       flipper_irdb: "Flipper-IRDB",
     }[key] || key));
     const kindLabel = k => this.kindLabel(k === "climate" ? "air_conditioner" : k);
+    const cleanDeviceLabel = (brand, model, fallback = "") => {
+      const b = String(brand || "").trim();
+      let m = String(model || fallback || "").trim();
+      if (b && m && m.toLowerCase() === b.toLowerCase()) m = "";
+      if (b && m.toLowerCase().startsWith((b + " ").toLowerCase())) m = m.slice(b.length).trim();
+      return [b, m].filter(Boolean).join(" · ") || this.tr("Chưa xác định", "Unknown");
+    };
     return `
       <section class="subsection identify-box">
         <div class="section-head compact-head"><div>
@@ -984,8 +991,8 @@ class HanjooIrPanel extends HTMLElement {
         ${r ? `<div class="identify-result ${r.recommended ? "strong" : "caution"}">
           <h3>${r.recommended ? this.tr("✓ Có khuyến nghị an toàn", "✓ Safe recommendation") : this.tr("Không có khuyến nghị tự động", "No automatic recommendation")}</h3>
           <p>${this.esc(this._lang === "vi" ? (r.message_vi || r.message || "") : (r.message_en || this.translateText(r.message || "")))}</p>
-          ${r.inferred_kind ? `<div class="meta"><span>Nhận dạng: <b>${this.esc(kindLabel(r.inferred_kind))}</b></span></div>` : ""}
-          <div class="meta"><span>${this.tr("Nguồn", "Sources")}: ${this.esc(usedSourceLabels.join(" · ") || "HanJoo Core")}</span></div>
+          ${r.inferred_kind ? `<div class="meta"><span>${this.tr("Loại thiết bị", "Device type")}: <b>${this.esc(kindLabel(r.inferred_kind))}</b></span></div>` : ""}
+          <div class="meta"><span>${this.tr("Bằng chứng nhận dạng", "Recognition evidence")}: ${this.esc(usedSourceLabels.join(" · ") || "HanJoo Core")}</span></div>
           ${!r.recommended ? `<div class="muted">${this.tr("Nếu Core không nhận diện đủ chắc, hãy chuyển sang tìm theo hãng/model hoặc học thủ công.", "If Core cannot identify the remote reliably, switch to brand/model search or manual learning.")}</div>
           ${!r.recommended ? `<div class="actions fallback-actions"><button data-identify-search>${this.tr("Tìm theo hãng/model", "Search by brand/model")}</button><button data-identify-manual>${this.tr("Học thủ công", "Manual learning")}</button></div>` : ""}` : ""}
           ${candidates.length ? `<div class="identify-candidates">${candidates.slice(0,8).map((x) => {
@@ -998,16 +1005,49 @@ class HanjooIrPanel extends HTMLElement {
             const replayVerified = this._identifyReplayVerified?.has(c.id);
             const canAdd = recommended || verified || !!c.recognition_only;
             const canTest = !!c.recognition_only || c.source === "protocol_engine" || c.source === "saved_profile" || !!c.catalog_id;
+            const protocol = String(c.protocol || c.variant || "").trim();
+            const title = cleanDeviceLabel(c.brand, c.recognition_only ? "" : (c.model || c.variant || ""));
             return `<article class="candidate-card ${recommended ? "recommended" : ""}">
-              <div class="candidate-main"><div class="candidate-title">${recommended ? `<span class="recommend">${this.tr("Khuyên dùng", "Recommended")}</span>` : ""}${verified ? `<span class="recommend verified">${this.tr("Đã xác nhận bằng Test", "Verified by Test")}</span>` : ""}${replayVerified ? `<span class="recommend verified">${this.tr("RAW phát lại OK", "RAW replay OK")}</span>` : ""}<b>${this.esc(c.brand || this.tr("Không rõ hãng", "Unknown brand"))}</b> ${this.esc(c.model || c.variant || "")}</div>
-              <div class="candidate-meta"><span>${this.esc(kindLabel(c.kind || c.semantic_type))}</span><span>${this.esc(sourceLabel(c.source))}</span><span>${this.tr("Độ tin cậy", "Confidence")} ${Number(x.confidence || 0)}%</span><span>${this.tr("Khớp", "Matched")} ${x.matched_captures || 0}/${x.capture_count || 0}</span>${x.distinct_matches != null ? `<span>${x.distinct_matches} ${this.tr("lệnh khác nhau", "different commands")}</span>` : ""}</div>${c.recognition_only ? `<div class="muted">${this.tr("Đã nhận diện họ giao thức; Test bên dưới sẽ phát lại chính mã RAW vừa thu, không khẳng định model cụ thể.", "Protocol family detected; the Test below replays the captured RAW code and does not by itself prove an exact model.")}</div>` : ""}</div>
-              <div class="actions">${canTest ? `<button data-identify-test="${this.esc(c.id || "")}">${c.recognition_only ? this.tr("Test mã vừa thu", "Test captured code") : this.tr("Test", "Test")}</button>` : ""}${canAdd ? `<button class="primary" data-identify-add="${this.esc(c.id || "")}">${c.source === "native_ha" ? (Number(c.installed_entries || 0) > 0 ? this.tr("Mở integration Native HA", "Open Native HA integration") : this.tr("Thiết lập Native HA", "Set up Native HA")) : (c.recognition_only ? this.tr("Tìm model/profile tương thích", "Find compatible models/profiles") : (verified && !recommended ? this.tr("Thêm thiết bị này", "Add this device") : this.tr("Dùng cấu hình này", "Use this configuration")))}</button>` : ""}</div>
+              <div class="candidate-main">
+                <div class="candidate-title">
+                  <span class="candidate-badges">${recommended ? `<span class="recommend">${this.tr("Khuyên dùng", "Recommended")}</span>` : ""}${verified ? `<span class="recommend verified">${this.tr("Đã xác nhận bằng Test", "Verified by Test")}</span>` : ""}${replayVerified ? `<span class="recommend verified">${this.tr("RAW phát lại OK", "RAW replay OK")}</span>` : ""}</span>
+                  <b>${this.esc(title)}</b>
+                </div>
+                <div class="candidate-meta">
+                  <span>${this.tr("Loại", "Type")}: ${this.esc(kindLabel(c.kind || c.semantic_type))}</span>
+                  ${protocol ? `<span>Protocol: ${this.esc(protocol)}</span>` : ""}
+                  <span>${this.tr("Bộ phân tích", "Analyzer")}: ${this.esc(c.engine === "irremoteesp8266" ? "IRremoteESP8266" : sourceLabel(c.source))}</span>
+                  <span>${this.tr("Độ tin cậy", "Confidence")}: ${Number(x.confidence || 0)}%</span>
+                  <span>${this.tr("Khớp", "Matched")}: ${x.matched_captures || 0}/${x.capture_count || 0}</span>
+                  ${x.distinct_matches != null ? `<span>${x.distinct_matches} ${this.tr("lệnh khác nhau", "different commands")}</span>` : ""}
+                </div>
+                ${c.recognition_only ? `<div class="muted">${this.tr("Đã xác định chắc hãng/họ giao thức, nhưng chưa đủ bằng chứng để khẳng định model chính xác. HanJoo ưu tiên các profile tương thích bên dưới để bạn Test.", "Brand/protocol family is strongly identified, but the exact model is not proven yet. HanJoo prioritizes compatible profiles below for testing.")}</div>` : ""}
+              </div>
+              <div class="actions">${canTest ? `<button data-identify-test="${this.esc(c.id || "")}">${c.recognition_only ? this.tr("Test mã vừa thu", "Test captured code") : this.tr("Test", "Test")}</button>` : ""}${canAdd ? `<button class="primary" data-identify-add="${this.esc(c.id || "")}">${c.source === "native_ha" ? (Number(c.installed_entries || 0) > 0 ? this.tr("Mở integration Native HA", "Open Native HA integration") : this.tr("Thiết lập Native HA", "Set up Native HA")) : (c.recognition_only ? this.tr("Xem profile tương thích", "View compatible profiles") : (verified && !recommended ? this.tr("Thêm thiết bị này", "Add this device") : this.tr("Dùng cấu hình này", "Use this configuration")))}</button>` : ""}</div>
             </article>`;
           }).join("")}</div>` : ""}
-          ${profileSuggestions.length ? `<div class="profile-suggestions"><h4>${this.tr("Model/profile có thể thử", "Models/profiles you can try")}</h4><p class="muted">${this.tr("Danh sách này được tìm tự động theo hãng/model mà Brain vừa nhận diện. Đây là gợi ý để Test, chưa được tính là bằng chứng nhận diện.", "This list is searched automatically from the detected brand/model hints. These are testable suggestions, not recognition evidence.")}</p>${profileSuggestions.slice(0,12).map((s) => {
+          ${profileSuggestions.length ? `<div class="profile-suggestions"><h4>${this.tr("Thiết bị/profile tương thích được gợi ý", "Suggested compatible devices/profiles")}</h4><p class="muted">${this.tr("Các mục khớp cùng hãng và đúng loại thiết bị được đưa lên đầu. Nếu model chưa được xác định chắc, hãy Test trước khi dùng.", "Profiles matching the detected brand and device type are ranked first. If the exact model is not proven, test it before use.")}</p>${profileSuggestions.slice(0,12).map((s, index) => {
             const sid = s.id || s.catalog_id || s.profile_id || "";
             const verified = this._identifyVerified?.has(`suggestion:${sid}`);
-            return `<article class="candidate-card suggestion-card"><div class="candidate-main"><div class="candidate-title">${verified ? `<span class="recommend verified">${this.tr("Đã xác nhận bằng Test", "Verified by Test")}</span>` : ""}<b>${this.esc(s.brand || this.tr("Không rõ hãng", "Unknown brand"))}</b> ${this.esc(s.model || s.name || "")}</div><div class="candidate-meta"><span>${this.esc(kindLabel(s.kind || s.type))}</span><span>${this.esc(sourceLabel(s.source))}</span><span>${this.tr("Gợi ý theo hãng/model", "Brand/model suggestion")}</span></div></div><div class="actions"><button data-identify-suggestion-test="${this.esc(sid)}">${this.tr("Test", "Test")}</button>${verified ? `<button class="primary" data-identify-suggestion-add="${this.esc(sid)}">${this.tr("Dùng profile này", "Use this profile")}</button>` : ""}</div></article>`;
+            const high = !!s.high_compatibility;
+            const reason = this._lang === "vi" ? s.recommendation_reason_vi : s.recommendation_reason_en;
+            const label = cleanDeviceLabel(s.brand, s.model || s.name || "");
+            return `<article class="candidate-card suggestion-card ${high ? "recommended" : ""}">
+              <div class="candidate-main">
+                <div class="candidate-title">
+                  ${high ? `<span class="recommend">${index === 0 ? this.tr("Gợi ý phù hợp nhất", "Best compatible suggestion") : this.tr("Độ tương thích cao", "High compatibility")}</span>` : ""}
+                  ${verified ? `<span class="recommend verified">${this.tr("Đã xác nhận bằng Test", "Verified by Test")}</span>` : ""}
+                  <b>${this.esc(label)}</b>
+                </div>
+                <div class="candidate-meta">
+                  <span>${this.esc(kindLabel(s.kind || s.type))}</span>
+                  <span>${this.esc(sourceLabel(s.source))}</span>
+                  ${s.compatibility_score ? `<span>${this.tr("Độ tương thích", "Compatibility")}: ${Number(s.compatibility_score)}%</span>` : ""}
+                </div>
+                ${reason ? `<div class="muted">${this.esc(reason)}</div>` : ""}
+              </div>
+              <div class="actions"><button data-identify-suggestion-test="${this.esc(sid)}">${this.tr("Test profile", "Test profile")}</button>${verified ? `<button class="primary" data-identify-suggestion-add="${this.esc(sid)}">${this.tr("Dùng profile này", "Use this profile")}</button>` : ""}</div>
+            </article>`;
           }).join("")}</div>` : ""}
         </div>` : ""}
       </section>`;

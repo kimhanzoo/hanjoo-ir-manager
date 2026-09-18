@@ -1026,28 +1026,35 @@ class HanjooIrPanel extends HTMLElement {
               <div class="actions">${canTest ? `<button data-identify-test="${this.esc(c.id || "")}">${c.recognition_only ? this.tr("Test mã vừa thu", "Test captured code") : this.tr("Test", "Test")}</button>` : ""}${canAdd ? `<button class="primary" data-identify-add="${this.esc(c.id || "")}">${c.source === "native_ha" ? (Number(c.installed_entries || 0) > 0 ? this.tr("Mở integration Native HA", "Open Native HA integration") : this.tr("Thiết lập Native HA", "Set up Native HA")) : (c.recognition_only ? this.tr("Xem profile tương thích", "View compatible profiles") : (verified && !recommended ? this.tr("Thêm thiết bị này", "Add this device") : this.tr("Dùng cấu hình này", "Use this configuration")))}</button>` : ""}</div>
             </article>`;
           }).join("")}</div>` : ""}
-          ${profileSuggestions.length ? `<div class="profile-suggestions"><h4>${this.tr("Thiết bị/profile tương thích được gợi ý", "Suggested compatible devices/profiles")}</h4><p class="muted">${this.tr("Các mục khớp cùng hãng và đúng loại thiết bị được đưa lên đầu. Nếu model chưa được xác định chắc, hãy Test trước khi dùng.", "Profiles matching the detected brand and device type are ranked first. If the exact model is not proven, test it before use.")}</p>${profileSuggestions.slice(0,12).map((s, index) => {
+          ${profileSuggestions.length ? `<div class="profile-suggestions"><h4>${this.tr("Mã điều khiển/profile phù hợp", "Compatible controls/profiles")}</h4><p class="muted">${this.tr("Xếp theo độ khớp mã IR trước, sau đó mới đến độ tin cậy của nguồn.", "Ranked by IR-code match first, then by source priority.")}</p>${profileSuggestions.slice(0,12).map((s, index) => {
             const sid = s.id || s.catalog_id || s.profile_id || "";
             const verified = this._identifyVerified?.has(`suggestion:${sid}`);
             const high = !!s.high_compatibility;
             const reason = this._lang === "vi" ? s.recommendation_reason_vi : s.recommendation_reason_en;
             const label = cleanDeviceLabel(s.brand, s.model || s.name || "");
-            return `<article class="candidate-card suggestion-card ${high ? "recommended" : ""}">
+            const match = Number(s.raw_match_score || (s.protocol_exact_match ? s.compatibility_score : 0) || 0);
+            const strongAdd = !!s.recognition_match && (match >= 85 || !!s.protocol_exact_match);
+            const detectedBy = s.detected_by || (s.protocol_hint ? "HanJoo Brain / IRremoteESP8266" : "");
+            const profileSource = s.source === "protocol_engine" ? "HanJoo Core" : sourceLabel(s.source);
+            return `<article class="candidate-card suggestion-card ${(high || s.recognition_match) ? "recommended" : ""}">
               <div class="candidate-main">
                 <div class="candidate-title">
-                  ${s.recognition_match ? `<span class="recommend">${index === 0 ? this.tr("Khớp mã IR tốt nhất", "Best IR code match") : this.tr("Mã IR khớp cao", "High IR code match")}</span>` : (high ? `<span class="recommend">${index === 0 ? this.tr("Gợi ý phù hợp nhất", "Best compatible suggestion") : this.tr("Độ tương thích cao", "High compatibility")}</span>` : "")}
+                  ${index === 0 && (strongAdd || match >= 85) ? `<span class="recommend">${this.tr("Gợi ý tốt nhất", "Best match")}</span>` : ""}
                   ${verified ? `<span class="recommend verified">${this.tr("Đã xác nhận bằng Test", "Verified by Test")}</span>` : ""}
-                  <b>${this.esc(label)}</b>
+                  <b>${match ? `${match}% · ` : ""}${this.esc(label)}</b>
                 </div>
                 <div class="candidate-meta">
-                  <span>${this.esc(kindLabel(s.kind || s.type))}</span>
-                  <span>${this.esc(sourceLabel(s.source))}</span>
-                  ${s.raw_match_score ? `<span>${this.tr("Khớp mã IR", "IR code match")}: ${Number(s.raw_match_score)}%</span>` : (s.compatibility_score ? `<span>${this.tr("Độ tương thích", "Compatibility")}: ${Number(s.compatibility_score)}%</span>` : "")}
+                  <span>${this.tr("Nguồn", "Source")}: ${this.esc(profileSource)}</span>
+                  ${detectedBy ? `<span>${this.tr("Phát hiện bởi", "Detected by")}: ${this.esc(detectedBy)}</span>` : ""}
+                  ${s.protocol_hint ? `<span>Protocol: ${this.esc(s.protocol_hint)}</span>` : ""}
                   ${s.raw_matched_captures ? `<span>${this.tr("Khớp mẫu", "Matched captures")}: ${Number(s.raw_matched_captures)}/${(this._identifyCaptures || []).length}</span>` : ""}
                 </div>
                 ${reason ? `<div class="muted">${this.esc(reason)}</div>` : ""}
               </div>
-              <div class="actions"><button data-identify-suggestion-test="${this.esc(sid)}">${this.tr("Test profile", "Test profile")}</button>${verified ? `<button class="primary" data-identify-suggestion-add="${this.esc(sid)}">${this.tr("Dùng profile này", "Use this profile")}</button>` : ""}</div>
+              <div class="actions">
+                <button data-identify-suggestion-test="${this.esc(sid)}">${this.tr("Test", "Test")}</button>
+                ${(verified || strongAdd) ? `<button class="primary" data-identify-suggestion-add="${this.esc(sid)}">${this.tr("Thêm thiết bị", "Add device")}</button>` : ""}
+              </div>
             </article>`;
           }).join("")}</div>` : ""}
         </div>` : ""}
@@ -2088,7 +2095,12 @@ class HanjooIrPanel extends HTMLElement {
 
   async addIdentifySuggestion(suggestionId) {
     const item = this.identifySuggestion(suggestionId); if (!item) return;
-    if (!this._identifyVerified?.has(`suggestion:${suggestionId}`)) return this.toast(this.tr("Hãy Test profile này trước.", "Test this profile first."), true);
+    const strong = !!item.recognition_match && (
+      Number(item.raw_match_score || 0) >= 85 || !!item.protocol_exact_match
+    );
+    if (!this._identifyVerified?.has(`suggestion:${suggestionId}`) && !strong) {
+      return this.toast(this.tr("Hãy Test profile này trước.", "Test this profile first."), true);
+    }
     const emitter = this._discoverEmitter || this._hardware.emitters[0] || "";
     const receiver = this._discoverReceiver || null;
     if (!emitter) return this.toast(this.tr("Hãy chọn IR Transmitter", "Select an IR Transmitter"), true);

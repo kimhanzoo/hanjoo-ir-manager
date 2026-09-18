@@ -56,17 +56,9 @@ if (PanelClass) {
     queueMicrotask(() => {
       const root = this.shadowRoot;
       if (!root) return;
-
-      // Recognition-only results are evidence, not directly addable devices.
-      const recognitionIds = new Set(
-        (this._identifyResult?.candidates || [])
-          .map(row => row?.candidate)
-          .filter(candidate => candidate?.recognition_only && candidate?.id)
-          .map(candidate => String(candidate.id))
-      );
-      root.querySelectorAll("[data-identify-add]").forEach(button => {
-        if (recognitionIds.has(String(button.dataset.identifyAdd || ""))) button.remove();
-      });
+      // Recognition-only family matches keep their compatibility-search action.
+      // They are not exact models, but they are useful evidence for finding a
+      // compatible profile instead of leaving only RAW replay.
 
       // Keep the three primary actions on one line in both VI and EN:
       // Start/Continue | Clear | Analyze again.

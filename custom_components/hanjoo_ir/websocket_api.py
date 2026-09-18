@@ -302,6 +302,125 @@ def _kind_matches_native(kind: str | None, device_types: list[str]) -> bool:
     return bool(wanted & {str(x).lower() for x in device_types})
 
 
+def _native_identification_candidates(
+    hass: HomeAssistant,
+    result: dict[str, Any],
+    kind_hint: str,
+) -> list[dict[str, Any]]:
+    """Map strong Core brand/type evidence to official Home Assistant IR integrations.
+
+    Native HA is a device-management preference, not an IR decoder. We only
+    surface it after Core has decoded the remote strongly enough to establish a
+    brand. This prevents a broad native catalog entry from influencing protocol
+    recognition while still giving an official HA integration highest priority
+    once the identity is known.
+    """
+    candidates = list(result.get("candidates") or [])
+    recommended_id = str(result.get("recommended_id") or "")
+    detected_kind = None
+    brand_rows: dict[str, dict[str, Any]] = {}
+
+    for row in candidates:
+        candidate = row.get("candidate") if isinstance(row.get("candidate"), dict) else {}
+        brand = str(candidate.get("brand") or "").strip()
+        if not brand:
+            continue
+        confidence = int(row.get("confidence") or 0)
+        key = brand.casefold()
+        previous = brand_rows.get(key)
+        if previous is None or confidence > int(previous.get("confidence") or 0):
+            brand_rows[key] = {
+                "brand": brand,
+                "confidence": confidence,
+                "matched_captures": int(row.get("matched_captures") or 0),
+                "capture_count": int(row.get("capture_count") or 0),
+                "core_candidate_id": str(candidate.get("id") or ""),
+                "kind": str(candidate.get("kind") or ""),
+            }
+        if str(candidate.get("id") or "") == recommended_id:
+            detected_kind = str(candidate.get("kind") or "") or detected_kind
+
+    for hint in result.get("brand_hints") or []:
+        brand = str(hint or "").strip()
+        if brand:
+            brand_rows.setdefault(
+                brand.casefold(),
+                {
+                    "brand": brand,
+                    "confidence": 0,
+                    "matched_captures": 0,
+                    "capture_count": 0,
+                    "core_candidate_id": "",
+                    "kind": "",
+                },
+            )
+
+    requested_kind = str(kind_hint or "").strip().lower()
+    if requested_kind in {"", "auto"}:
+        requested_kind = str(detected_kind or "").strip().lower()
+
+    out: list[dict[str, Any]] = []
+    for native in NATIVE_INTEGRATIONS:
+        brand = str(native.get("brand") or "").strip()
+        evidence = brand_rows.get(brand.casefold())
+        if evidence is None:
+            continue
+        if requested_kind and not _kind_matches_native(
+            requested_kind, list(native.get("device_types") or [])
+        ):
+            continue
+
+        confidence = int(evidence.get("confidence") or 0)
+        core_id = str(evidence.get("core_candidate_id") or "")
+        strong = (
+            bool(result.get("recommended"))
+            and bool(core_id)
+            and core_id == recommended_id
+            and confidence >= 90
+        )
+        native_kind = requested_kind or str(evidence.get("kind") or "")
+        if not native_kind:
+            native_kind = (native.get("device_types") or ["custom"])[0]
+
+        domain = str(native["domain"])
+        installed = len(hass.config_entries.async_entries(domain))
+        candidate_id = f"native_ha:{domain}"
+        out.append(
+            {
+                "candidate": {
+                    "id": candidate_id,
+                    "brand": brand,
+                    "model": str(native.get("name") or ""),
+                    "kind": native_kind,
+                    "source": "native_ha",
+                    "action": "native",
+                    "native_domain": domain,
+                    "installed_entries": installed,
+                    "device_types": list(native.get("device_types") or []),
+                    "recognition_only": False,
+                },
+                "group_id": f"native_ha:{domain}",
+                "confidence": confidence,
+                "matched_captures": int(evidence.get("matched_captures") or 0),
+                "capture_count": int(evidence.get("capture_count") or 0),
+                "distinct_matches": None,
+                "evidence_sources": ["hanjoo_core_brain", "native_ha_catalog"],
+                "evidence": "official_ha_integration_for_detected_brand",
+                "_core_recommended": strong,
+                "_native_priority": True,
+            }
+        )
+
+    out.sort(
+        key=lambda row: (
+            -int(bool(row.get("_core_recommended"))),
+            -int((row.get("candidate") or {}).get("installed_entries") or 0),
+            -int(row.get("confidence") or 0),
+        )
+    )
+    return out
+
+
 def _candidate_text(candidate: dict[str, Any]) -> str:
     return " ".join(
         str(candidate.get(key) or "")
@@ -1038,8 +1157,46 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
         _error(connection, msg, err)
         return
 
+    native_identified: list[dict[str, Any]] = []
+    if settings.get("native_ha", True):
+        native_identified = _native_identification_candidates(
+            hass, result, kind_hint
+        )
+        if native_identified:
+            existing_ids = {
+                str((row.get("candidate") or {}).get("id") or "")
+                for row in result.get("candidates") or []
+            }
+            result["candidates"] = native_identified + [
+                row
+                for row in result.get("candidates") or []
+                if str((row.get("candidate") or {}).get("id") or "") not in {
+                    str((native_row.get("candidate") or {}).get("id") or "")
+                    for native_row in native_identified
+                }
+            ]
+            best_native = native_identified[0]
+            if best_native.get("_core_recommended"):
+                native_id = str((best_native.get("candidate") or {}).get("id") or "")
+                result["recommended"] = True
+                result["recommended_id"] = native_id
+                result["equivalent_candidate_ids"] = [native_id]
+                native_candidate = best_native.get("candidate") or {}
+                brand = str(native_candidate.get("brand") or "")
+                name = str(native_candidate.get("model") or "Native Home Assistant")
+                result["message_vi"] = (
+                    f"Core đã nhận diện {brand}; Home Assistant có integration chính thức "
+                    f"{name} nên HanJoo ưu tiên dùng Native HA."
+                )
+                result["message_en"] = (
+                    f"Core identified {brand}; Home Assistant provides the official "
+                    f"{name} integration, so HanJoo prioritizes Native HA."
+                )
+                result["message"] = result["message_en"]
+
     for row in result.get("candidates") or []:
         row.pop("_core_recommended", None)
+        row.pop("_native_priority", None)
     inferred = None
     if result.get("recommended"):
         for row in result.get("candidates") or []:
@@ -1071,6 +1228,7 @@ async def ws_fusion_identify(hass, connection, msg) -> None:
             "inferred_kind": inferred,
             "profile_suggestions": suggestions[:16],
             "sources_used": {
+                "native_ha": bool(settings.get("native_ha") and native_identified),
                 "hanjoo_core_brain": True,
                 "saved_profile": True,
                 "smartir": bool(settings.get("smartir") and online_queries),

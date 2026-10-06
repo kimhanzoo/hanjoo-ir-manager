@@ -380,6 +380,8 @@ class HanJooIRManager:
                     "temp": cell.get("temp"),
                     "fan": cell.get("fan"),
                     "swing": cell.get("swing"),
+                    "swing_horizontal": cell.get("swing_horizontal"),
+                    "preset": cell.get("preset"),
                     "power": True,
                     "matched": "state",
                 }
@@ -550,6 +552,7 @@ class HanJooIRManager:
             return
         if not decoded:
             return
+        decoded = self._canonical_native_hvac(decoded)
         update = {
             "type": "climate",
             "source": "protocol_decoder",
@@ -615,6 +618,7 @@ class HanJooIRManager:
         )
         has_rx_match_data = (
             isinstance(device.get("protocol_engine"), dict)
+            or bool(device.get("rx_protocol_hint"))
             or any(item.get("codes") for item in commands.values())
             or bool(climate.get("on") and climate.get("on", {}).get("codes"))
             or bool(climate.get("off") and climate.get("off", {}).get("codes"))

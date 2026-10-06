@@ -260,19 +260,31 @@ def _classify_climate_path(
     swing_modes: list[str],
     min_temp: float,
     max_temp: float,
+    swing_horizontal_modes: list[str] | None = None,
+    preset_modes: list[str] | None = None,
 ) -> dict[str, Any]:
     fan = None
     swing = None
+    swing_horizontal = None
+    preset = None
     temp = None
     extras: list[str] = []
     fan_lookup = {str(v): str(v) for v in fan_modes}
     swing_lookup = {str(v): str(v) for v in swing_modes}
+    swing_h_lookup = {str(v): str(v) for v in (swing_horizontal_modes or [])}
+    preset_lookup = {str(v): str(v) for v in (preset_modes or [])}
     for part in path:
         if fan is None and part in fan_lookup:
             fan = fan_lookup[part]
             continue
         if swing is None and part in swing_lookup:
             swing = swing_lookup[part]
+            continue
+        if swing_horizontal is None and part in swing_h_lookup:
+            swing_horizontal = swing_h_lookup[part]
+            continue
+        if preset is None and part in preset_lookup:
+            preset = preset_lookup[part]
             continue
         try:
             number = float(part)
@@ -283,7 +295,14 @@ def _classify_climate_path(
                 temp = number
             else:
                 extras.append(part)
-    return {"fan": fan, "swing": swing, "temp": temp, "extras": extras}
+    return {
+        "fan": fan,
+        "swing": swing,
+        "swing_horizontal": swing_horizontal,
+        "preset": preset,
+        "temp": temp,
+        "extras": extras,
+    }
 
 
 def _convert_smartir_climate(data: dict[str, Any]) -> ImportResult:
@@ -304,6 +323,15 @@ def _convert_smartir_climate(data: dict[str, Any]) -> ImportResult:
     modes = [str(v) for v in (data.get("operationModes") or [])]
     fan_modes = [str(v) for v in (data.get("fanModes") or [])]
     swing_modes = [str(v) for v in (data.get("swingModes") or [])]
+    swing_horizontal_modes = [
+        str(v)
+        for v in (
+            data.get("swingHorizontalModes")
+            or data.get("horizontalSwingModes")
+            or []
+        )
+    ]
+    preset_modes = [str(v) for v in (data.get("presetModes") or [])]
     commands = data.get("commands") or {}
     if not isinstance(commands, dict):
         raise ProfileImportError("SmartIR climate commands must be an object")
@@ -316,6 +344,8 @@ def _convert_smartir_climate(data: dict[str, Any]) -> ImportResult:
         "modes": modes,
         "fan_modes": fan_modes,
         "swing_modes": swing_modes,
+        "swing_horizontal_modes": swing_horizontal_modes,
+        "preset_modes": preset_modes,
         "off": None,
         "on": None,
         "cells": [],
@@ -345,12 +375,22 @@ def _convert_smartir_climate(data: dict[str, Any]) -> ImportResult:
                 decoded = _decode_value(leaf, encoding, warnings, "/".join((top_key, *path)))
                 if decoded is None:
                     continue
-                dims = _classify_climate_path(path, fan_modes, swing_modes, min_temp, max_temp)
+                dims = _classify_climate_path(
+                    path,
+                    fan_modes,
+                    swing_modes,
+                    min_temp,
+                    max_temp,
+                    swing_horizontal_modes,
+                    preset_modes,
+                )
                 climate["cells"].append(
                     {
                         "mode": str(top_key),
                         "fan": dims["fan"],
                         "swing": dims["swing"],
+                        "swing_horizontal": dims["swing_horizontal"],
+                        "preset": dims["preset"],
                         "temp": dims["temp"],
                         "extras": dims["extras"],
                         **decoded,
@@ -358,8 +398,17 @@ def _convert_smartir_climate(data: dict[str, Any]) -> ImportResult:
                 )
             continue
 
-        # Depth-0 extras (sleep/turbo/etc.) remain ordinary buttons.
-        if not isinstance(top_value, dict):
+        # Extras (sleep/turbo/timer/light/clean/etc.) are not standard
+        # temperature matrix dimensions. Preserve *all* their leaves as
+        # ordinary HanJoo commands so Home Assistant exposes them as buttons.
+        # Older code silently dropped nested extras such as timer/{1h,2h,...}.
+        if isinstance(top_value, dict):
+            for path, leaf in _walk_leaves(top_value, (str(top_key),)):
+                label = " / ".join(path)
+                item = _command_item(label, leaf, encoding, warnings, label)
+                if item:
+                    profile["commands"][_slug(label)] = item
+        else:
             item = _command_item(
                 _title(str(top_key)), top_value, encoding, warnings, str(top_key)
             )
@@ -426,6 +475,8 @@ def _convert_hair_wig(data: dict[str, Any]) -> ImportResult:
             "modes": [str(v) for v in (climate_block.get("modes") or [])],
             "fan_modes": [str(v) for v in (climate_block.get("fan_modes") or [])],
             "swing_modes": [str(v) for v in (climate_block.get("swing_modes") or [])],
+            "swing_horizontal_modes": [str(v) for v in (climate_block.get("swing_horizontal_modes") or [])],
+            "preset_modes": [str(v) for v in (climate_block.get("preset_modes") or [])],
             "off": None,
             "on": None,
             "cells": [],
@@ -453,6 +504,8 @@ def _convert_hair_wig(data: dict[str, Any]) -> ImportResult:
                     "mode": str(cell.get("mode") or "auto"),
                     "fan": None if cell.get("fan") is None else str(cell.get("fan")),
                     "swing": None if cell.get("swing") is None else str(cell.get("swing")),
+                    "swing_horizontal": None if cell.get("swing_horizontal") is None else str(cell.get("swing_horizontal")),
+                    "preset": None if cell.get("preset") is None else str(cell.get("preset")),
                     "temp": None if cell.get("temp") is None else float(cell.get("temp")),
                     "extras": [],
                     "codes": [code],

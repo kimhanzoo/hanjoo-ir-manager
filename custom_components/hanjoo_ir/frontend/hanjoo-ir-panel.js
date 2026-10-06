@@ -2116,7 +2116,13 @@ class HanjooIrPanel extends HTMLElement {
           const installed = await this.ws("online/install", { catalog_id: item.catalog_id || item.id });
           profileId = installed.profile_id;
         }
-        result = await this.ws("device/create_from_profile", { profile_id: profileId, name, emitters: [emitter], receiver });
+        result = await this.ws("device/create_from_profile", {
+          profile_id: profileId,
+          name,
+          emitters: [emitter],
+          receiver,
+          protocol_hint: item.protocol_hint || item.protocol || null,
+        });
       }
       this._busyText = ""; await this.sleep(900); this._identifyCaptures=[]; this._identifyResult=null; this._identifyVerified=new Set(); this._identifyReplayVerified=new Set(); await this.loadAll(); this._tab="devices"; this.render(); this.toast(`${this.tr("Đã thêm thiết bị", "Added device")} ${result.device_id || name}`);
     } catch (err) { this._busyText = ""; this.render(); this.toast(this.errText(err), true); }
@@ -2165,7 +2171,13 @@ class HanjooIrPanel extends HTMLElement {
           profileId = installed.profile_id;
         }
         if (!profileId) throw new Error("Không lấy được profile để thêm thiết bị");
-        result = await this.ws("device/create_from_profile", { profile_id: profileId, name, emitters: [emitter], receiver });
+        result = await this.ws("device/create_from_profile", {
+          profile_id: profileId,
+          name,
+          emitters: [emitter],
+          receiver,
+          protocol_hint: item.protocol_hint || item.protocol || null,
+        });
       }
       this._busyText = ""; await this.sleep(900); this._identifyCaptures=[]; this._identifyResult=null; this._identifyVerified = new Set(); await this.loadAll(); this._tab="devices"; this.render(); this.toast(`Đã thêm thiết bị ${result.device_id || name}`);
     } catch (err) { this._busyText = ""; this.render(); this.toast(this.errText(err), true); }

@@ -10,6 +10,8 @@ _ORIGINAL_FUSE = HanJooCoreClient.fuse_identification
 
 _MODE = {-1: "off", 0: "auto", 1: "cool", 2: "heat", 3: "dry", 4: "fan_only"}
 _FAN = {0: "auto", 1: "min", 2: "low", 3: "medium", 4: "high", 5: "max", 6: "medium_high"}
+_SWING_V = {-1: "off", 0: "auto", 1: "highest", 2: "high", 3: "middle", 4: "low", 5: "lowest", 6: "upper_middle"}
+_SWING_H = {-1: "off", 0: "auto", 1: "left_max", 2: "left", 3: "middle", 4: "right", 5: "right_max", 6: "wide"}
 
 
 def _canonical(value: Any) -> dict[str, Any]:
@@ -24,6 +26,26 @@ def _canonical(value: Any) -> dict[str, Any]:
     if out.get("fan") is None:
         fan = out.get("fanspeed")
         out["fan"] = _FAN.get(int(fan), fan) if isinstance(fan, (int, float)) else fan
+    if out.get("swing") is None:
+        swingv = out.get("swingv")
+        out["swing"] = _SWING_V.get(int(swingv), swingv) if isinstance(swingv, (int, float)) else swingv
+    if out.get("swing_horizontal") is None:
+        swingh = out.get("swingh")
+        out["swing_horizontal"] = _SWING_H.get(int(swingh), swingh) if isinstance(swingh, (int, float)) else swingh
+
+    # Preserve the richer stdAc state. Home Assistant climate has native
+    # support for fan/vertical swing/horizontal swing/presets; the remaining
+    # fields are surfaced as extra state and can back extra buttons/profiles.
+    if out.get("preset") is None:
+        for key in ("turbo", "quiet", "econo", "clean", "sleep"):
+            value = out.get(key)
+            if key == "sleep":
+                enabled = isinstance(value, (int, float)) and int(value) >= 0
+            else:
+                enabled = value is True
+            if enabled:
+                out["preset"] = key
+                break
     return out
 
 

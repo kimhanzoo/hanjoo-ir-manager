@@ -6,11 +6,21 @@ from typing import Any
 from homeassistant.components.climate import (
     ATTR_FAN_MODE,
     ATTR_HVAC_MODE,
+    ATTR_PRESET_MODE,
     ATTR_SWING_MODE,
     ClimateEntity,
     ClimateEntityFeature,
     HVACMode,
 )
+try:
+    # Home Assistant 2026.10 supports horizontal swing as a first-class
+    # climate capability. Keep a soft import fallback for slightly older cores.
+    from homeassistant.components.climate.const import (
+        ATTR_SWING_HORIZONTAL_MODE,
+    )
+except ImportError:  # pragma: no cover - compatibility with older HA
+    ATTR_SWING_HORIZONTAL_MODE = "swing_horizontal_mode"
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
@@ -39,6 +49,7 @@ _MODE_ALIASES = {
     "fan_only": HVACMode.FAN_ONLY,
     "fanonly": HVACMode.FAN_ONLY,
 }
+_PRESET_COMMANDS = ("turbo", "quiet", "econo", "sleep", "clean")
 
 
 def _ha_mode(source: str) -> HVACMode | None:
@@ -49,10 +60,20 @@ def _source_mode(climate: dict, ha_mode: HVACMode) -> str | None:
     for source in climate.get("modes") or []:
         if _ha_mode(str(source)) == ha_mode:
             return str(source)
-    # Learned custom devices use HA's canonical vocabulary.
     if ha_mode is not HVACMode.OFF:
         return str(ha_mode)
     return None
+
+
+def _ordered_unique(values: list[Any]) -> list[str]:
+    out: list[str] = []
+    for value in values:
+        if value is None:
+            continue
+        item = str(value)
+        if item and item not in out:
+            out.append(item)
+    return out
 
 
 async def async_setup_entry(
@@ -69,15 +90,30 @@ async def async_setup_entry(
 
 
 class HanJooClimate(HanJooEntity, ClimateEntity, RestoreEntity):
-    """Climate wrapper for imported or learned full-state IR frames."""
+    """Climate wrapper for imported, learned, or dynamic full-state IR."""
 
     _attr_assumed_state = True
 
     def __init__(self, manager: HanJooIRManager, device_id: str) -> None:
         HanJooEntity.__init__(self, manager, device_id, "climate")
         self._attr_name = None
+        self._climate: dict[str, Any] = {}
+        self._default_on_mode = HVACMode.COOL
+        self._attr_hvac_mode = HVACMode.OFF
+        self._attr_target_temperature = 24.0
+        self._attr_fan_mode = None
+        self._attr_swing_mode = None
+        self._attr_swing_horizontal_mode = None
+        self._attr_preset_mode = None
+        self._rx_extra: dict[str, Any] = {}
+        self._refresh_capabilities(initial=True)
+
+    def _refresh_capabilities(self, *, initial: bool = False) -> None:
+        """Refresh all capabilities from the current runtime device/profile."""
         climate = self.device.get("climate") or {}
         self._climate = climate
+        cells = [cell for cell in (climate.get("cells") or []) if isinstance(cell, dict)]
+        first_cell = cells[0] if cells else {}
 
         modes: list[HVACMode] = [HVACMode.OFF]
         for source in climate.get("modes") or []:
@@ -85,13 +121,8 @@ class HanJooClimate(HanJooEntity, ClimateEntity, RestoreEntity):
             if mode and mode not in modes:
                 modes.append(mode)
         if len(modes) == 1:
-            # A custom stateful AC begins useful, but it still refuses to send
-            # a combination until that exact state is learned.
-            modes.extend(
-                [HVACMode.COOL, HVACMode.DRY, HVACMode.FAN_ONLY, HVACMode.HEAT]
-            )
+            modes.extend([HVACMode.COOL, HVACMode.DRY, HVACMode.FAN_ONLY, HVACMode.HEAT])
         self._attr_hvac_modes = modes
-        self._attr_hvac_mode = HVACMode.OFF
 
         self._attr_min_temp = float(climate.get("min_temp", 16))
         self._attr_max_temp = float(climate.get("max_temp", 30))
@@ -101,30 +132,66 @@ class HanJooClimate(HanJooEntity, ClimateEntity, RestoreEntity):
             if str(climate.get("unit") or "C").upper().startswith("F")
             else UnitOfTemperature.CELSIUS
         )
-        cells = climate.get("cells") or []
-        first_cell = cells[0] if cells else {}
-        first_temp = first_cell.get("temp")
-        self._attr_target_temperature = (
-            float(first_temp)
-            if first_temp is not None
-            else float(climate.get("default_temp", self._attr_min_temp))
-        )
 
-        fan_modes = [str(v) for v in (climate.get("fan_modes") or [])]
+        if initial:
+            first_temp = first_cell.get("temp")
+            self._attr_target_temperature = (
+                float(first_temp)
+                if first_temp is not None
+                else float(climate.get("default_temp", self._attr_min_temp))
+            )
+
+        fan_modes = _ordered_unique(
+            list(climate.get("fan_modes") or [])
+            + [cell.get("fan") for cell in cells]
+        )
         self._attr_fan_modes = fan_modes or None
-        self._attr_fan_mode = (
-            str(first_cell.get("fan"))
-            if first_cell.get("fan") is not None
-            else (fan_modes[0] if fan_modes else None)
-        )
+        if self._attr_fan_mode not in fan_modes:
+            self._attr_fan_mode = (
+                str(first_cell.get("fan"))
+                if first_cell.get("fan") is not None
+                else (fan_modes[0] if fan_modes else None)
+            )
 
-        swing_modes = [str(v) for v in (climate.get("swing_modes") or [])]
-        self._attr_swing_modes = swing_modes or None
-        self._attr_swing_mode = (
-            str(first_cell.get("swing"))
-            if first_cell.get("swing") is not None
-            else (swing_modes[0] if swing_modes else None)
+        swing_modes = _ordered_unique(
+            list(climate.get("swing_modes") or [])
+            + [cell.get("swing") for cell in cells]
         )
+        self._attr_swing_modes = swing_modes or None
+        if self._attr_swing_mode not in swing_modes:
+            self._attr_swing_mode = (
+                str(first_cell.get("swing"))
+                if first_cell.get("swing") is not None
+                else (swing_modes[0] if swing_modes else None)
+            )
+
+        swing_h_modes = _ordered_unique(
+            list(climate.get("swing_horizontal_modes") or climate.get("horizontal_swing_modes") or [])
+            + [cell.get("swing_horizontal") for cell in cells]
+        )
+        self._attr_swing_horizontal_modes = swing_h_modes or None
+        if self._attr_swing_horizontal_mode not in swing_h_modes:
+            self._attr_swing_horizontal_mode = (
+                str(first_cell.get("swing_horizontal"))
+                if first_cell.get("swing_horizontal") is not None
+                else (swing_h_modes[0] if swing_h_modes else None)
+            )
+
+        commands = self.device.get("commands") or {}
+        presets = _ordered_unique(
+            list(climate.get("preset_modes") or [])
+            + [cell.get("preset") for cell in cells]
+            + [
+                command_id
+                for command_id in _PRESET_COMMANDS
+                if isinstance(commands.get(command_id), dict)
+                and commands[command_id].get("codes")
+            ]
+        )
+        self._attr_preset_modes = presets or None
+        if self._attr_preset_mode not in presets:
+            self._attr_preset_mode = None
+
         first_mode = _ha_mode(str(first_cell.get("mode") or ""))
         self._default_on_mode = (
             first_mode
@@ -140,7 +207,23 @@ class HanJooClimate(HanJooEntity, ClimateEntity, RestoreEntity):
             features |= ClimateEntityFeature.FAN_MODE
         if swing_modes:
             features |= ClimateEntityFeature.SWING_MODE
+        if swing_h_modes and hasattr(ClimateEntityFeature, "SWING_HORIZONTAL_MODE"):
+            features |= ClimateEntityFeature.SWING_HORIZONTAL_MODE
+        if presets:
+            features |= ClimateEntityFeature.PRESET_MODE
         self._attr_supported_features = features
+
+        device = self.device
+        has_feedback_path = bool(device.get("receiver_entity_id")) and bool(
+            device.get("protocol_engine")
+            or device.get("rx_protocol_hint")
+            or cells
+            or climate.get("on")
+            or climate.get("off")
+        )
+        # Once a receiver is configured with a decodable/matchable profile, the
+        # climate entity is no longer purely optimistic.
+        self._attr_assumed_state = not has_feedback_path
 
     def _apply_received_state(self, state: dict[str, Any] | None) -> None:
         """Apply a physical-remote state decoded/matched by HanJoo manager."""
@@ -164,16 +247,49 @@ class HanJooClimate(HanJooEntity, ClimateEntity, RestoreEntity):
                 pass
 
         fan = state.get("fan")
-        if fan in (self._attr_fan_modes or []):
-            self._attr_fan_mode = fan
+        if fan is not None:
+            fan = str(fan)
+            if fan in (self._attr_fan_modes or []):
+                self._attr_fan_mode = fan
+
         swing = state.get("swing")
-        if swing in (self._attr_swing_modes or []):
-            self._attr_swing_mode = swing
+        if swing is not None:
+            swing = str(swing)
+            if swing in (self._attr_swing_modes or []):
+                self._attr_swing_mode = swing
+
+        swing_h = state.get("swing_horizontal")
+        if swing_h is not None:
+            swing_h = str(swing_h)
+            if swing_h in (self._attr_swing_horizontal_modes or []):
+                self._attr_swing_horizontal_mode = swing_h
+
+        preset = state.get("preset")
+        if preset is not None and str(preset) in (self._attr_preset_modes or []):
+            self._attr_preset_mode = str(preset)
+
+        self._rx_extra = {
+            key: state.get(key)
+            for key in (
+                "protocol", "source", "quiet", "turbo", "econo", "light",
+                "filter", "clean", "beep", "sleep", "clock", "received_at",
+            )
+            if state.get(key) is not None
+        }
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose non-standard decoded A/C state without hiding it."""
+        return {
+            f"hanjoo_{key}": value
+            for key, value in self._rx_extra.items()
+        }
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         state = await self.async_get_last_state()
         if state is None:
+            self._apply_received_state(self.manager.get_received_state(self.device_id))
             return
         try:
             restored_mode = HVACMode(state.state)
@@ -193,6 +309,13 @@ class HanJooClimate(HanJooEntity, ClimateEntity, RestoreEntity):
         swing = state.attributes.get(ATTR_SWING_MODE)
         if swing in (self._attr_swing_modes or []):
             self._attr_swing_mode = swing
+        swing_h = state.attributes.get(ATTR_SWING_HORIZONTAL_MODE)
+        if swing_h in (self._attr_swing_horizontal_modes or []):
+            self._attr_swing_horizontal_mode = swing_h
+        preset = state.attributes.get(ATTR_PRESET_MODE)
+        if preset in (self._attr_preset_modes or []):
+            self._attr_preset_mode = preset
+        self._apply_received_state(self.manager.get_received_state(self.device_id))
 
     async def _send_current(
         self,
@@ -201,6 +324,8 @@ class HanJooClimate(HanJooEntity, ClimateEntity, RestoreEntity):
         temp: float | None = None,
         fan: str | None = None,
         swing: str | None = None,
+        swing_horizontal: str | None = None,
+        preset: str | None = None,
     ) -> None:
         target_mode = mode or self._attr_hvac_mode or HVACMode.OFF
         if target_mode is HVACMode.OFF:
@@ -212,20 +337,30 @@ class HanJooClimate(HanJooEntity, ClimateEntity, RestoreEntity):
                     temp=temp if temp is not None else self._attr_target_temperature,
                     fan=fan if fan is not None else self._attr_fan_mode,
                     swing=swing if swing is not None else self._attr_swing_mode,
+                    swing_horizontal=(
+                        swing_horizontal
+                        if swing_horizontal is not None
+                        else self._attr_swing_horizontal_mode
+                    ),
+                    preset=preset if preset is not None else self._attr_preset_mode,
                 )
             return
 
         source = _source_mode(self._climate, target_mode)
         if source is None:
-            raise HomeAssistantError(
-                f"Profile không hỗ trợ chế độ {target_mode}"
-            )
+            raise HomeAssistantError(f"Profile không hỗ trợ chế độ {target_mode}")
         await self.manager.send_climate_state(
             self.device_id,
             mode=source,
             temp=temp if temp is not None else self._attr_target_temperature,
             fan=fan if fan is not None else self._attr_fan_mode,
             swing=swing if swing is not None else self._attr_swing_mode,
+            swing_horizontal=(
+                swing_horizontal
+                if swing_horizontal is not None
+                else self._attr_swing_horizontal_mode
+            ),
+            preset=preset if preset is not None else self._attr_preset_mode,
         )
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
@@ -251,6 +386,29 @@ class HanJooClimate(HanJooEntity, ClimateEntity, RestoreEntity):
     async def async_set_swing_mode(self, swing_mode: str) -> None:
         await self._send_current(swing=swing_mode)
         self._attr_swing_mode = swing_mode
+        self.async_write_ha_state()
+
+    async def async_set_swing_horizontal_mode(self, swing_horizontal_mode: str) -> None:
+        await self._send_current(swing_horizontal=swing_horizontal_mode)
+        self._attr_swing_horizontal_mode = swing_horizontal_mode
+        self.async_write_ha_state()
+
+    async def async_set_preset_mode(self, preset_mode: str) -> None:
+        # Prefer an explicit full-state matrix dimension when the profile has
+        # one. Otherwise use a dedicated extra command such as Turbo/Sleep.
+        has_matrix_preset = any(
+            cell.get("preset") is not None
+            for cell in (self._climate.get("cells") or [])
+            if isinstance(cell, dict)
+        )
+        if has_matrix_preset or isinstance(self.device.get("protocol_engine"), dict):
+            await self._send_current(preset=preset_mode)
+        else:
+            command = (self.device.get("commands") or {}).get(preset_mode)
+            if not isinstance(command, dict) or not command.get("codes"):
+                raise HomeAssistantError(f"Profile không có mã cho chế độ {preset_mode}")
+            await self.manager.send_command(self.device_id, preset_mode)
+        self._attr_preset_mode = preset_mode
         self.async_write_ha_state()
 
     async def async_turn_off(self) -> None:

@@ -391,11 +391,25 @@ class HanJooCoreClient:
         mode: str | None,
         temp: float | None,
         fan: str | None,
+        swing: str | None = None,
+        swing_horizontal: str | None = None,
+        preset: str | None = None,
+        options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        payload = {
+            "protocol": protocol,
+            "mode": mode,
+            "temp": temp,
+            "fan": fan,
+            "swing": swing,
+            "swing_horizontal": swing_horizontal,
+            "preset": preset,
+            "options": options or {},
+        }
         data = await self._json(
             "POST",
             "/v1/generate",
-            payload={"protocol": protocol, "mode": mode, "temp": temp, "fan": fan},
+            payload=payload,
         )
         if not isinstance(data, dict) or not data.get("codes"):
             raise HanJooCoreError("Core could not generate an IR code")

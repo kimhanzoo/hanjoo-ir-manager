@@ -2043,6 +2043,7 @@ async def ws_device_create_from_captures(hass, connection, msg) -> None:
         vol.Required("name"): str,
         vol.Required("emitters"): [str],
         vol.Optional("receiver"): vol.Any(str, None),
+        vol.Optional("protocol_hint"): vol.Any(str, None),
     }
 )
 @websocket_api.async_response
@@ -2058,6 +2059,7 @@ async def ws_device_create_from_profile(hass, connection, msg) -> None:
             name=msg["name"],
             emitters=msg["emitters"],
             receiver=msg.get("receiver"),
+            protocol_hint=msg.get("protocol_hint"),
         )
         connection.send_result(msg["id"], {"device_id": device_id})
         _reload_soon(hass, entry_id)

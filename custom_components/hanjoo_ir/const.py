@@ -3,7 +3,7 @@ from __future__ import annotations
 
 DOMAIN = "hanjoo_ir"
 NAME = "HanJoo IR Manager"
-VERSION = "0.6.24"
+VERSION = "0.6.25"
 AUTHOR_NAME = "HanJoo"
 AUTHOR_FACEBOOK = "Kim Han Yuu"
 AUTHOR_EMAIL = "kimhanzoo@gmail.com"

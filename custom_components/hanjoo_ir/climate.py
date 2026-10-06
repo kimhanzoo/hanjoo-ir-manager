@@ -2,6 +2,12 @@
 from __future__ import annotations
 
 from typing import Any
+from datetime import datetime
+import logging
+import math
+import time
+
+from homeassistant.helpers.event import async_call_later
 
 from homeassistant.components.climate import (
     ATTR_FAN_MODE,
@@ -50,6 +56,7 @@ _MODE_ALIASES = {
     "fanonly": HVACMode.FAN_ONLY,
 }
 _PRESET_COMMANDS = ("turbo", "quiet", "econo", "sleep", "clean")
+_LOGGER = logging.getLogger(__name__)
 
 
 def _ha_mode(source: str) -> HVACMode | None:
@@ -106,6 +113,11 @@ class HanJooClimate(HanJooEntity, ClimateEntity, RestoreEntity):
         self._attr_swing_horizontal_mode = None
         self._attr_preset_mode = None
         self._rx_extra: dict[str, Any] = {}
+        self._last_rx_sequence = -1
+        self._timer_cancel = None
+        self._timer_deadline = None
+        self._timer_action = None
+        self._timer_error = None
         self._refresh_capabilities(initial=True)
 
     def _refresh_capabilities(self, *, initial: bool = False) -> None:
@@ -229,6 +241,11 @@ class HanJooClimate(HanJooEntity, ClimateEntity, RestoreEntity):
         """Apply a physical-remote state decoded/matched by HanJoo manager."""
         if not state or state.get("type") != "climate":
             return
+        sequence = state.get("sequence")
+        if sequence is not None:
+            if sequence == self._last_rx_sequence:
+                return
+            self._last_rx_sequence = sequence
         mode = state.get("mode")
         if mode is not None:
             ha_mode = _ha_mode(str(mode))
@@ -236,6 +253,8 @@ class HanJooClimate(HanJooEntity, ClimateEntity, RestoreEntity):
                 self._attr_hvac_mode = ha_mode
         if state.get("power") is False:
             self._attr_hvac_mode = HVACMode.OFF
+        elif state.get("power") is True and self._attr_hvac_mode is HVACMode.OFF:
+            self._attr_hvac_mode = self._default_on_mode
 
         temp = state.get("temp")
         if temp is not None:
@@ -267,6 +286,8 @@ class HanJooClimate(HanJooEntity, ClimateEntity, RestoreEntity):
         preset = state.get("preset")
         if preset is not None and str(preset) in (self._attr_preset_modes or []):
             self._attr_preset_mode = str(preset)
+        elif preset == "none":
+            self._attr_preset_mode = None
 
         self._rx_extra = {
             key: state.get(key)
@@ -281,13 +302,17 @@ class HanJooClimate(HanJooEntity, ClimateEntity, RestoreEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Expose non-standard decoded A/C state without hiding it."""
         return {
-            f"hanjoo_{key}": value
-            for key, value in self._rx_extra.items()
+            "hanjoo_device_id": self.device_id,
+            "hanjoo_timer_deadline": self._timer_deadline,
+            "hanjoo_timer_action": self._timer_action,
+            "hanjoo_timer_error": self._timer_error,
+            **{f"hanjoo_{key}": value for key, value in self._rx_extra.items()},
         }
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         state = await self.async_get_last_state()
+        self.async_on_remove(self._cancel_timer_callback)
         if state is None:
             self._apply_received_state(self.manager.get_received_state(self.device_id))
             return
@@ -316,6 +341,55 @@ class HanJooClimate(HanJooEntity, ClimateEntity, RestoreEntity):
         if preset in (self._attr_preset_modes or []):
             self._attr_preset_mode = preset
         self._apply_received_state(self.manager.get_received_state(self.device_id))
+        deadline = state.attributes.get("hanjoo_timer_deadline")
+        action = state.attributes.get("hanjoo_timer_action")
+        if isinstance(deadline, (int, float)) and action in ("on", "off"):
+            if deadline > time.time():
+                self._arm_timer(deadline, action)
+
+    def _cancel_timer_callback(self) -> None:
+        if self._timer_cancel is not None:
+            self._timer_cancel()
+            self._timer_cancel = None
+
+    def _arm_timer(self, deadline: float, action: str) -> None:
+        self._cancel_timer_callback()
+        self._timer_deadline = deadline
+        self._timer_action = action
+        self._timer_error = None
+
+        async def execute(_now: datetime) -> None:
+            self._timer_cancel = None
+            self._timer_deadline = None
+            self._timer_action = None
+            try:
+                if action == "off":
+                    await self.async_turn_off()
+                else:
+                    await self.async_turn_on()
+            except HomeAssistantError as err:
+                self._timer_error = str(err)
+                _LOGGER.warning("HanJoo timer failed for %s: %s", self.entity_id, err)
+            finally:
+                self.async_write_ha_state()
+
+        self._timer_cancel = async_call_later(
+            self.hass, max(0, deadline - time.time()), execute
+        )
+
+    async def async_set_timer(self, minutes: float, action: str = "off") -> None:
+        """Schedule a local HA power command; zero cancels the pending timer."""
+        if not math.isfinite(minutes) or not 0 <= minutes <= 10080:
+            raise HomeAssistantError("Hẹn giờ phải nằm trong 0–10080 phút")
+        if action not in ("on", "off"):
+            raise HomeAssistantError("Hẹn giờ chỉ hỗ trợ bật hoặc tắt")
+        self._cancel_timer_callback()
+        self._timer_deadline = None
+        self._timer_action = None
+        self._timer_error = None
+        if minutes:
+            self._arm_timer(time.time() + minutes * 60, action)
+        self.async_write_ha_state()
 
     async def _send_current(
         self,

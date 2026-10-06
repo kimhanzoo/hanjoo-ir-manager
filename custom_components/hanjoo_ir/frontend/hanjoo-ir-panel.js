@@ -1380,10 +1380,20 @@ class HanjooIrPanel extends HTMLElement {
     const c = device.climate || {};
     const cells = c.cells || [];
     const protocol = device.protocol_engine;
+    const entity = Object.values(this._hass?.states || {}).find(s => s.entity_id.startsWith("climate.") && s.attributes.hanjoo_device_id === device.id);
+    const deadline = entity?.attributes.hanjoo_timer_deadline;
+    const timerHelp = `<div class="callout"><b>Hẹn giờ bật/tắt</b><p>Home Assistant sẽ phát IR khi hết giờ. HA và bộ phát cần hoạt động; lịch còn hạn được khôi phục sau restart.</p>
+      ${deadline ? `<p>${this.esc(entity.attributes.hanjoo_timer_action === "on" ? "Bật" : "Tắt")} lúc ${this.esc(new Date(deadline * 1000).toLocaleString())}</p>` : ""}
+      <form id="climate-timer-form" class="form-grid">
+        <label>Số phút<input name="minutes" type="number" min="1" max="10080" step="1" value="60" required></label>
+        <label>Thao tác<select name="action"><option value="off">Tắt</option><option value="on">Bật</option></select></label>
+        <div class="form-actions"><button type="submit" ${entity ? "" : "disabled"}>Đặt hẹn giờ</button><button type="button" data-cancel-climate-timer ${entity ? "" : "disabled"}>Hủy hẹn giờ</button></div>
+      </form>${entity ? "" : "<p>Khởi động lại Home Assistant sau khi cập nhật để dùng hẹn giờ.</p>"}
+      ${entity?.attributes.hanjoo_timer_error ? `<p>${this.esc(entity.attributes.hanjoo_timer_error)}</p>` : ""}</div>`;
     if (protocol) {
       return `
         <section class="modal-section climate-box">
-          <h3>⚙️ Protocol Engine</h3>
+          <h3>⚙️ Protocol Engine</h3>${timerHelp}
           <p class="muted">Thiết bị này <b>không cần học từng nhiệt độ</b>. HanJoo tạo frame IR khi phát và, nếu có Receiver, giải mã remote thật để đồng bộ trạng thái về Home Assistant.</p>
           <div class="meta">
             <span>${this.esc(protocol.variant || protocol.engine)}</span>
@@ -1396,7 +1406,7 @@ class HanjooIrPanel extends HTMLElement {
     }
     return `
       <section class="modal-section climate-box">
-        <h3>❄️ Climate state matrix</h3>
+        <h3>❄️ Climate state matrix</h3>${timerHelp}
         <p class="muted">Mỗi mã là <b>một trạng thái đầy đủ</b>. Đây là cách đúng với remote điều hòa stateful.</p>
         <div class="meta">
           <span>${cells.length} trạng thái</span>
@@ -1416,11 +1426,13 @@ class HanjooIrPanel extends HTMLElement {
           </select></label>
           <label>Nhiệt độ<input name="temp" type="number" step="${this.esc(c.precision || 1)}" min="${this.esc(c.min_temp ?? 16)}" max="${this.esc(c.max_temp ?? 30)}" value="25"></label>
           <label>Fan<input name="fan" placeholder="auto / low / medium / high" value="auto"></label>
-          <label>Swing<input name="swing" placeholder="off / on" value="off"></label>
+          <label>Swing dọc<input name="swing" placeholder="off / on" value="off"></label>
+          <label>Swing ngang<input name="swing_horizontal" placeholder="Bỏ trống nếu không hỗ trợ"></label>
+          <label>Preset<input name="preset" placeholder="turbo / quiet / sleep (nếu có)"></label>
           <div class="form-actions"><button class="primary" type="submit">Học trạng thái này</button></div>
         </form>
         ${cells.length ? `<details><summary>Xem ${cells.length} trạng thái đã có</summary>
-          <div class="cell-list">${cells.slice(0, 250).map(x => `<span>${this.esc([x.mode, x.fan, x.swing, x.temp != null ? `${x.temp}°` : null].filter(Boolean).join(" · "))}</span>`).join("")}${cells.length > 250 ? `<span>… +${cells.length - 250}</span>` : ""}</div>
+          <div class="cell-list">${cells.slice(0, 250).map(x => `<span>${this.esc([x.mode, x.fan, x.swing, x.swing_horizontal, x.preset, x.temp != null ? `${x.temp}°` : null].filter(Boolean).join(" · "))}</span>`).join("")}${cells.length > 250 ? `<span>… +${cells.length - 250}</span>` : ""}</div>
         </details>` : ""}
       </section>`;
   }
@@ -1818,6 +1830,14 @@ class HanjooIrPanel extends HTMLElement {
     if (routing) routing.addEventListener("submit", e => this.updateRouting(e));
     const addCommand = q("#add-command-form");
     if (addCommand) addCommand.addEventListener("submit", e => this.addCommand(e));
+    const climateTimer = q("#climate-timer-form");
+    if (climateTimer) climateTimer.addEventListener("submit", e => {
+      e.preventDefault();
+      const form = new FormData(e.currentTarget);
+      this.setClimateTimer(Number(form.get("minutes")), String(form.get("action")));
+    });
+    const cancelTimer = q("[data-cancel-climate-timer]");
+    if (cancelTimer) cancelTimer.addEventListener("click", () => this.setClimateTimer(0, "off"));
     const climateLearn = q("#climate-learn-form");
     if (climateLearn) climateLearn.addEventListener("submit", e => this.learnClimate(e));
 
@@ -2467,6 +2487,17 @@ class HanjooIrPanel extends HTMLElement {
     });
   }
 
+  async setClimateTimer(minutes, action) {
+    const deviceId = this._detail?.device?.id;
+    const entity = Object.values(this._hass?.states || {}).find(s => s.entity_id.startsWith("climate.") && s.attributes.hanjoo_device_id === deviceId);
+    if (!entity) return this.toast("Không tìm thấy climate của thiết bị. Hãy restart Home Assistant sau cập nhật.", true);
+    try {
+      await this._hass.callService("hanjoo_ir", "set_timer", { entity_id: entity.entity_id, minutes, action });
+      this.toast(minutes ? `Đã hẹn ${action === "on" ? "bật" : "tắt"} sau ${minutes} phút` : "Đã hủy hẹn giờ");
+      this.render();
+    } catch (err) { this.toast(this.errText(err), true); }
+  }
+
   async learnClimate(e) {
     e.preventDefault();
     const f = new FormData(e.currentTarget);
@@ -2483,6 +2514,8 @@ class HanjooIrPanel extends HTMLElement {
         temp: power === "state" ? Number(f.get("temp")) : null,
         fan: power === "state" ? (String(f.get("fan") || "") || null) : null,
         swing: power === "state" ? (String(f.get("swing") || "") || null) : null,
+        swing_horizontal: power === "state" ? (String(f.get("swing_horizontal") || "") || null) : null,
+        preset: power === "state" ? (String(f.get("preset") || "") || null) : null,
       },
     });
   }

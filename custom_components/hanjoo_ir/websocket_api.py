@@ -2230,6 +2230,8 @@ async def ws_device_capture(hass, connection, msg) -> None:
         vol.Optional("temp"): vol.Any(vol.Coerce(float), None),
         vol.Optional("fan"): vol.Any(str, None),
         vol.Optional("swing"): vol.Any(str, None),
+        vol.Optional("swing_horizontal"): vol.Any(str, None),
+        vol.Optional("preset"): vol.Any(str, None),
         vol.Optional("power", default="state"): vol.In(["state", "on", "off"]),
     }
 )
@@ -2258,6 +2260,8 @@ async def ws_device_save_capture(hass, connection, msg) -> None:
                 temp=msg.get("temp"),
                 fan=msg.get("fan"),
                 swing=msg.get("swing"),
+                swing_horizontal=msg.get("swing_horizontal"),
+                preset=msg.get("preset"),
                 power=msg["power"],
             )
         connection.send_result(msg["id"], {"ok": True})
@@ -2321,6 +2325,8 @@ async def ws_device_learn(hass, connection, msg) -> None:
         vol.Optional("temp"): vol.Any(vol.Coerce(float), None),
         vol.Optional("fan"): vol.Any(str, None),
         vol.Optional("swing"): vol.Any(str, None),
+        vol.Optional("swing_horizontal"): vol.Any(str, None),
+        vol.Optional("preset"): vol.Any(str, None),
         vol.Optional("power", default="state"): vol.In(["state", "on", "off"]),
         vol.Optional("timeout", default=DEFAULT_LEARN_TIMEOUT): vol.All(int, vol.Range(min=2, max=120)),
     }
@@ -2339,6 +2345,8 @@ async def ws_device_learn_climate(hass, connection, msg) -> None:
             temp=msg.get("temp"),
             fan=msg.get("fan"),
             swing=msg.get("swing"),
+            swing_horizontal=msg.get("swing_horizontal"),
+            preset=msg.get("preset"),
             power=msg["power"],
             timeout=int(msg["timeout"]),
         )

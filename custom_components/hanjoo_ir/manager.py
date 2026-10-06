@@ -98,6 +98,7 @@ class HanJooIRManager:
         self._receiver_refresh_lock = asyncio.Lock()
         self._rx_states: dict[str, dict[str, Any]] = {}
         self._rx_sequence = 0
+        self._rx_decode_tokens: dict[str, int] = {}
         self._suppress_receivers_until: dict[str, float] = {}
         # Receivers currently reserved by the explicit Learn workflow.
         # Background remote-state synchronization ignores these receivers until
@@ -226,6 +227,8 @@ class HanJooIRManager:
     async def async_stop_receiver_monitoring(self) -> None:
         """Remove all continuous receiver subscriptions."""
         self._receiver_monitor_started = False
+        for device_id in self._rx_decode_tokens:
+            self._rx_decode_tokens[device_id] += 1
         for unsubscribe in list(self._receiver_unsubs.values()):
             try:
                 unsubscribe()
@@ -400,6 +403,15 @@ class HanJooIRManager:
         """Translate IRremoteESP8266 stdAc numeric enums into HA semantics."""
         if not isinstance(value, dict):
             return {}
+        value = dict(value)
+        for source, target in (("fanSpeed", "fanspeed"), ("swingV", "swingv"), ("swingH", "swingh")):
+            if target not in value and source in value:
+                value[target] = value[source]
+        if not any(value.get(key) is not None for key in (
+            "power", "mode", "temp", "temperature", "degrees", "fan", "fanspeed",
+            "swing", "swingv", "swingh", "quiet", "turbo", "econo", "sleep", "clean", "light", "filter", "beep", "clock", "preset",
+        )):
+            return {}
         out = dict(value)
         mode_map = {-1: "off", 0: "auto", 1: "cool", 2: "heat", 3: "dry", 4: "fan_only"}
         fan_map = {0: "auto", 1: "min", 2: "low", 3: "medium", 4: "high", 5: "max", 6: "medium_high"}
@@ -413,6 +425,8 @@ class HanJooIRManager:
         if out.get("fan") is None:
             fan = out.get("fanspeed")
             out["fan"] = fan_map.get(int(fan), fan) if isinstance(fan, (int, float)) else fan
+        elif isinstance(out.get("fan"), (int, float)):
+            out["fan"] = fan_map.get(int(out["fan"]), out["fan"])
         if out.get("swing") is None:
             value_v = out.get("swingv")
             out["swing"] = swing_v.get(int(value_v), value_v) if isinstance(value_v, (int, float)) else value_v
@@ -426,6 +440,8 @@ class HanJooIRManager:
                     break
             if out.get("preset") is None and isinstance(out.get("sleep"), (int, float)) and int(out["sleep"]) >= 0:
                 out["preset"] = "sleep"
+            if out.get("preset") is None and all(key in out for key in ("turbo", "quiet", "econo", "clean", "sleep")):
+                out["preset"] = "none"
         return out
 
     async def _async_decode_native_hint_signal(
@@ -434,6 +450,7 @@ class HanJooIRManager:
         protocol_hint: str,
         receiver: str,
         timings: list[int],
+        token: int,
     ) -> None:
         """Decode receiver traffic for imported profiles using native protocol evidence."""
         try:
@@ -458,6 +475,8 @@ class HanJooIRManager:
             )
             if not state:
                 continue
+            if self._rx_decode_tokens.get(device_id) != token:
+                return
             self._record_received_state(
                 device_id,
                 {
@@ -510,6 +529,8 @@ class HanJooIRManager:
         for device_id, device in self.get_devices().items():
             if device.get("receiver_entity_id") != receiver:
                 continue
+            token = self._rx_decode_tokens.get(device_id, 0) + 1
+            self._rx_decode_tokens[device_id] = token
 
             protocol = device.get("protocol_engine")
             if isinstance(protocol, dict):
@@ -517,7 +538,7 @@ class HanJooIRManager:
                 # block the infrared receiver callback while waiting for local RPC.
                 self.hass.async_create_task(
                     self._async_decode_protocol_signal(
-                        device_id, protocol, receiver, list(timings)
+                        device_id, protocol, receiver, list(timings), token
                     )
                 )
                 continue
@@ -530,7 +551,7 @@ class HanJooIRManager:
                 # feedback rather than requiring an exact RAW cell match.
                 self.hass.async_create_task(
                     self._async_decode_native_hint_signal(
-                        device_id, protocol_hint, receiver, list(timings)
+                        device_id, protocol_hint, receiver, list(timings), token
                     )
                 )
 
@@ -545,6 +566,7 @@ class HanJooIRManager:
         protocol: dict[str, Any],
         receiver: str,
         timings: list[int],
+        token: int,
     ) -> None:
         try:
             decoded = await self.core.decode(protocol, timings)
@@ -553,6 +575,8 @@ class HanJooIRManager:
         if not decoded:
             return
         decoded = self._canonical_native_hvac(decoded)
+        if not decoded or self._rx_decode_tokens.get(device_id) != token:
+            return
         update = {
             "type": "climate",
             "source": "protocol_decoder",
@@ -1063,6 +1087,8 @@ class HanJooIRManager:
         temp: float | None,
         fan: str | None,
         swing: str | None,
+        swing_horizontal: str | None = None,
+        preset: str | None = None,
         power: str = "state",
     ) -> None:
         device = self._require_device(device_id)
@@ -1083,6 +1109,8 @@ class HanJooIRManager:
                 "temp": None if temp is None else float(temp),
                 "fan": fan or None,
                 "swing": swing or None,
+                "swing_horizontal": swing_horizontal or None,
+                "preset": preset or None,
                 "extras": [],
                 **learned,
             }
@@ -1099,6 +1127,10 @@ class HanJooIRManager:
                 self._extend_unique(climate.setdefault("fan_modes", []), fan)
             if swing:
                 self._extend_unique(climate.setdefault("swing_modes", []), swing)
+            if swing_horizontal:
+                self._extend_unique(climate.setdefault("swing_horizontal_modes", []), swing_horizontal)
+            if preset:
+                self._extend_unique(climate.setdefault("preset_modes", []), preset)
         await self.async_save()
 
     async def learn_command(
@@ -1119,6 +1151,8 @@ class HanJooIRManager:
         temp: float | None,
         fan: str | None,
         swing: str | None,
+        swing_horizontal: str | None = None,
+        preset: str | None = None,
         power: str = "state",
         timeout: int = DEFAULT_LEARN_TIMEOUT,
     ) -> None:
@@ -1131,6 +1165,8 @@ class HanJooIRManager:
             temp=temp,
             fan=fan,
             swing=swing,
+            swing_horizontal=swing_horizontal,
+            preset=preset,
             power=power,
         )
 
@@ -1258,6 +1294,9 @@ class HanJooIRManager:
         emitters = list(device.get("emitter_entity_ids") or [])
         if not emitters:
             raise HomeAssistantError("Thiết bị chưa chọn IR Transmitter")
+        for device_id, configured in self.get_devices().items():
+            if configured is device:
+                self._rx_decode_tokens[device_id] = self._rx_decode_tokens.get(device_id, 0) + 1
         send_count = (
             max(1, int(repeat_override))
             if repeat_override is not None
@@ -1598,8 +1637,9 @@ class HanJooIRManager:
     @staticmethod
     def _climate_key(cell: dict[str, Any]) -> str:
         return "|".join(
-            str(cell.get(key) if cell.get(key) is not None else "")
-            for key in ("mode", "fan", "swing", "temp")
+            (format(float(cell[key]), "g") if key == "temp" and cell.get(key) is not None
+             else str(cell.get(key) if cell.get(key) is not None else ""))
+            for key in ("mode", "fan", "swing", "swing_horizontal", "preset", "temp")
         )
 
     @staticmethod

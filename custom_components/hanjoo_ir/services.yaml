@@ -1,0 +1,25 @@
+set_timer:
+  name: Hẹn giờ điều hòa
+  description: Home Assistant phát IR để bật/tắt sau số phút đã chọn. HA và bộ phát phải hoạt động lúc hết giờ. Khôi phục lịch còn hạn sau restart; bỏ lịch đã hết hạn. Nhập 0 để hủy. Nút Timer đã học vẫn phát mã hẹn giờ gốc của remote.
+  target:
+    entity:
+      integration: hanjoo_ir
+      domain: climate
+  fields:
+    minutes:
+      name: Số phút
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 10080
+          step: 1
+          mode: box
+    action:
+      name: Thao tác
+      default: off
+      selector:
+        select:
+          options:
+            - "off"
+            - "on"

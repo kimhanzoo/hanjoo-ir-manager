@@ -279,18 +279,37 @@ class HanJooIRManager:
 
     @staticmethod
     def _normalize_rx_timings(values: list[Any]) -> list[int]:
-        out: list[int] = []
-        for idx, value in enumerate(values):
+        """Normalize receiver timings without destroying an existing polarity.
+
+        Home Assistant receivers expose a list[int]. Some integrations already
+        use signed mark/space durations while others provide unsigned alternating
+        HIGH/LOW durations. Older HanJoo code always re-applied index parity,
+        which shifted the whole frame whenever a signed capture started with an
+        idle space. That made two-way decoding fail even though learning worked.
+        """
+        parsed: list[int] = []
+        saw_negative = False
+        for value in values:
             try:
                 if hasattr(value, "duration"):
                     value = getattr(value, "duration")
-                duration = abs(int(value))
+                number = int(value)
             except (TypeError, ValueError):
                 return []
-            if duration <= 0:
+            if number == 0:
                 continue
-            out.append(duration if idx % 2 == 0 else -duration)
-        return out
+            saw_negative = saw_negative or number < 0
+            parsed.append(number)
+
+        if not parsed:
+            return []
+        if saw_negative:
+            out = list(parsed)
+            while out and out[0] < 0:
+                out.pop(0)
+            return out
+
+        return [abs(value) if idx % 2 == 0 else -abs(value) for idx, value in enumerate(parsed)]
 
     @staticmethod
     def _raw_timings_match(
@@ -374,6 +393,81 @@ class HanJooIRManager:
                 }
         return None
 
+    @staticmethod
+    def _canonical_native_hvac(value: dict[str, Any] | None) -> dict[str, Any]:
+        """Translate IRremoteESP8266 stdAc numeric enums into HA semantics."""
+        if not isinstance(value, dict):
+            return {}
+        out = dict(value)
+        mode_map = {-1: "off", 0: "auto", 1: "cool", 2: "heat", 3: "dry", 4: "fan_only"}
+        fan_map = {0: "auto", 1: "min", 2: "low", 3: "medium", 4: "high", 5: "max", 6: "medium_high"}
+        swing_v = {-1: "off", 0: "auto", 1: "highest", 2: "high", 3: "middle", 4: "low", 5: "lowest", 6: "upper_middle"}
+        swing_h = {-1: "off", 0: "auto", 1: "left_max", 2: "left", 3: "middle", 4: "right", 5: "right_max", 6: "wide"}
+
+        if out.get("temp") is None:
+            out["temp"] = out.get("temperature", out.get("degrees"))
+        if isinstance(out.get("mode"), (int, float)):
+            out["mode"] = mode_map.get(int(out["mode"]), out["mode"])
+        if out.get("fan") is None:
+            fan = out.get("fanspeed")
+            out["fan"] = fan_map.get(int(fan), fan) if isinstance(fan, (int, float)) else fan
+        if out.get("swing") is None:
+            value_v = out.get("swingv")
+            out["swing"] = swing_v.get(int(value_v), value_v) if isinstance(value_v, (int, float)) else value_v
+        if out.get("swing_horizontal") is None:
+            value_h = out.get("swingh")
+            out["swing_horizontal"] = swing_h.get(int(value_h), value_h) if isinstance(value_h, (int, float)) else value_h
+        if out.get("preset") is None:
+            for key in ("turbo", "quiet", "econo", "clean"):
+                if out.get(key) is True:
+                    out["preset"] = key
+                    break
+            if out.get("preset") is None and isinstance(out.get("sleep"), (int, float)) and int(out["sleep"]) >= 0:
+                out["preset"] = "sleep"
+        return out
+
+    async def _async_decode_native_hint_signal(
+        self,
+        device_id: str,
+        protocol_hint: str,
+        receiver: str,
+        timings: list[int],
+    ) -> None:
+        """Decode receiver traffic for imported profiles using native protocol evidence."""
+        try:
+            result = await self.core.probe_all(timings)
+        except HanJooCoreError:
+            return
+        native = result.get("irremoteesp8266") if isinstance(result, dict) else None
+        if not isinstance(native, dict):
+            return
+        rows = native.get("candidates") if isinstance(native.get("candidates"), list) else []
+        if not rows and isinstance(native.get("match"), dict):
+            rows = [native["match"]]
+        wanted = str(protocol_hint or "").strip().casefold()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            protocol = str(row.get("protocol") or "").strip()
+            if wanted and protocol.casefold() != wanted:
+                continue
+            state = self._canonical_native_hvac(
+                row.get("hvac_state") if isinstance(row.get("hvac_state"), dict) else {}
+            )
+            if not state:
+                continue
+            self._record_received_state(
+                device_id,
+                {
+                    "type": "climate",
+                    "source": "irremoteesp8266",
+                    "protocol": protocol,
+                    **state,
+                },
+                receiver=receiver,
+            )
+            return
+
     def _record_received_state(
         self,
         device_id: str,
@@ -425,6 +519,18 @@ class HanJooIRManager:
                     )
                 )
                 continue
+
+            protocol_hint = str(device.get("rx_protocol_hint") or "").strip()
+            if device.get("type") == DEVICE_TYPE_CLIMATE and protocol_hint:
+                # Imported SmartIR/Flipper profiles do not carry a HanJoo
+                # protocol_engine object, but identification may already have
+                # proven the wire protocol. Use that evidence for true two-way
+                # feedback rather than requiring an exact RAW cell match.
+                self.hass.async_create_task(
+                    self._async_decode_native_hint_signal(
+                        device_id, protocol_hint, receiver, list(timings)
+                    )
+                )
 
             matched = self._match_stored_signal(device, timings, modulation)
             if matched:
@@ -685,6 +791,7 @@ class HanJooIRManager:
         name: str,
         emitters: list[str],
         receiver: str | None,
+        protocol_hint: str | None = None,
     ) -> str:
         profile = self.get_profile(profile_id)
         if not profile:
@@ -697,6 +804,8 @@ class HanJooIRManager:
         device["source"] = f"profile:{profile.get('source') or 'imported'}"
         device["emitter_entity_ids"] = list(dict.fromkeys(emitters))
         device["receiver_entity_id"] = receiver
+        if protocol_hint:
+            device["rx_protocol_hint"] = str(protocol_hint).strip()
         # Import-only metadata should not be copied to every runtime device.
         device.pop("import_warnings", None)
         device.pop("import_filename", None)
@@ -1206,6 +1315,8 @@ class HanJooIRManager:
         temp: float | None,
         fan: str | None,
         swing: str | None,
+        swing_horizontal: str | None = None,
+        preset: str | None = None,
     ) -> dict[str, Any]:
         device = self._require_device(device_id)
         climate = device.get("climate") or {}
@@ -1217,6 +1328,9 @@ class HanJooIRManager:
                     mode=mode,
                     temp=temp,
                     fan=fan,
+                    swing=swing,
+                    swing_horizontal=swing_horizontal,
+                    preset=preset,
                 )
             except HanJooCoreError as err:
                 raise HomeAssistantError(str(err)) from err
@@ -1226,14 +1340,25 @@ class HanJooIRManager:
                 "temp": temp,
                 "fan": fan,
                 "swing": swing,
+                "swing_horizontal": swing_horizontal,
+                "preset": preset,
             }
 
         if mode in (None, "off"):
             await self._send_item(device, climate.get("off"))
-            return {"mode": "off", "temp": temp, "fan": fan, "swing": swing}
+            return {
+                "mode": "off", "temp": temp, "fan": fan, "swing": swing,
+                "swing_horizontal": swing_horizontal, "preset": preset,
+            }
 
         match = self.find_climate_cell(
-            climate, mode=mode, temp=temp, fan=fan, swing=swing
+            climate,
+            mode=mode,
+            temp=temp,
+            fan=fan,
+            swing=swing,
+            swing_horizontal=swing_horizontal,
+            preset=preset,
         )
         if match is None:
             raise HomeAssistantError(
@@ -1246,6 +1371,8 @@ class HanJooIRManager:
             "temp": match.get("temp"),
             "fan": match.get("fan"),
             "swing": match.get("swing"),
+            "swing_horizontal": match.get("swing_horizontal"),
+            "preset": match.get("preset"),
         }
 
     @staticmethod
@@ -1256,6 +1383,8 @@ class HanJooIRManager:
         temp: float | None,
         fan: str | None,
         swing: str | None,
+        swing_horizontal: str | None = None,
+        preset: str | None = None,
     ) -> dict[str, Any] | None:
         """Return the most specific compatible climate state cell.
 
@@ -1269,7 +1398,12 @@ class HanJooIRManager:
                 continue
             score = 10
             mismatch = False
-            for field, requested in (("fan", fan), ("swing", swing)):
+            for field, requested in (
+                ("fan", fan),
+                ("swing", swing),
+                ("swing_horizontal", swing_horizontal),
+                ("preset", preset),
+            ):
                 stored = cell.get(field)
                 if stored is None:
                     continue

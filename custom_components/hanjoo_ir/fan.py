@@ -63,10 +63,9 @@ class HanJooFan(HanJooEntity, FanEntity):
             command_id = f"speed:{speed}"
             if commands.get(command_id, {}).get("codes"):
                 out.append((speed, command_id))
-        if out:
-            return out
+        known = {command_id for _, command_id in out}
         for command_id, item in commands.items():
-            if not item.get("codes"):
+            if not item.get("codes") or command_id in known:
                 continue
             if command_id.startswith("speed:"):
                 out.append((command_id.split(":", 1)[1], command_id))

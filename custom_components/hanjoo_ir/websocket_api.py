@@ -107,6 +107,8 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
         ws_device_learn_climate,
         ws_device_send,
         ws_device_export,
+        ws_device_update_json,
+        ws_profile_update_json,
         ws_profiles,
         ws_profile_import,
         ws_profile_delete,
@@ -2441,6 +2443,48 @@ async def ws_profiles(hass, connection, msg) -> None:
         return
     manager, _ = runtime
     connection.send_result(msg["id"], manager.profile_summaries())
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({
+    vol.Required("type"): f"{WS_PREFIX}/profile/update_json",
+    vol.Required("profile_id"): str,
+    vol.Required("text"): str,
+})
+@websocket_api.async_response
+async def ws_profile_update_json(hass, connection, msg) -> None:
+    runtime = _runtime(hass)
+    if runtime is None:
+        connection.send_error(msg["id"], "not_configured", "HanJoo IR chưa được cấu hình")
+        return
+    manager, _entry_id = runtime
+    try:
+        await manager.update_profile_json(msg["profile_id"], msg["text"])
+        connection.send_result(msg["id"], {"ok": True})
+    except Exception as err:
+        _error(connection, msg, err)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({
+    vol.Required("type"): f"{WS_PREFIX}/device/update_json",
+    vol.Required("device_id"): str,
+    vol.Required("text"): str,
+})
+@websocket_api.async_response
+async def ws_device_update_json(hass, connection, msg) -> None:
+    runtime = _runtime(hass)
+    if runtime is None:
+        connection.send_error(msg["id"], "not_configured", "HanJoo IR chưa được cấu hình")
+        return
+    manager, entry_id = runtime
+    try:
+        await manager.update_device_json(msg["device_id"], msg["text"])
+        if not await hass.config_entries.async_reload(entry_id):
+            raise HomeAssistantError("Đã lưu JSON nhưng chưa tải lại được tích hợp. Hãy tải lại HanJoo IR.")
+        connection.send_result(msg["id"], {"ok": True})
+    except Exception as err:
+        _error(connection, msg, err)
 
 
 @websocket_api.require_admin

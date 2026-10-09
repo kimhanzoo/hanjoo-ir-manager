@@ -551,7 +551,7 @@ class HanjooIrPanel extends HTMLElement {
     const nodes = [];
     while (walker.nextNode()) nodes.push(walker.currentNode);
     for (const node of nodes) {
-      if (["STYLE", "SCRIPT"].includes(node.parentElement?.tagName)) continue;
+      if (["STYLE", "SCRIPT", "TEXTAREA"].includes(node.parentElement?.tagName)) continue;
       node.nodeValue = this.translateText(node.nodeValue);
     }
     root.querySelectorAll?.("[placeholder],[title],[aria-label]").forEach(el => {
@@ -784,6 +784,7 @@ class HanjooIrPanel extends HTMLElement {
       </div>
       ${this._detail ? this.renderModal() : ""}
       ${this._learnDialog ? this.renderLearnDialog() : ""}
+      ${this._jsonEditor ? this.renderJsonEditor() : ""}
     `;
     this.translateDom(this.shadowRoot);
     const haMenu = this.shadowRoot.querySelector("#hanjoo-ha-menu");
@@ -1259,6 +1260,7 @@ class HanjooIrPanel extends HTMLElement {
             <div class="actions">
               <button data-test-profile="${this.esc(p.id)}">Test</button>
               <button data-export-profile="${this.esc(p.id)}">Export</button>
+              <button data-edit-json-profile="${this.esc(p.id)}">Sửa JSON</button>
               <button class="primary" data-add-profile="${this.esc(p.id)}">Dùng profile</button>
               <button class="danger" data-delete-profile="${this.esc(p.id)}">Xóa</button>
             </div>
@@ -1370,6 +1372,7 @@ class HanjooIrPanel extends HTMLElement {
           <div class="modal-footer">
             ${device.summary?.ha_device_id ? `<button data-overview="${this.esc(device.summary.ha_device_id)}">Mở device trong Home Assistant</button>` : ""}
             <button data-export-device>Export thiết bị</button>
+            <button data-edit-json-device>Sửa / nhập JSON</button>
             <button class="danger" data-delete-device>Xóa thiết bị</button>
           </div>
         </div>
@@ -1492,6 +1495,23 @@ class HanjooIrPanel extends HTMLElement {
           </div>` : ""}
       </div>
     </div>`;
+  }
+
+  renderJsonEditor() {
+    const d = this._jsonEditor;
+    return `<div class="learn-backdrop"><div class="learn-dialog" style="width:min(900px,95vw)">
+      <div class="learn-head"><h2>Sửa JSON ${d.target === "device" ? "thiết bị" : "profile"}</h2></div>
+      <div class="learn-body">
+        <p>${d.target === "device" ? "Lưu sẽ thay thế dữ liệu điều khiển của thiết bị này. Giữ nguyên ID, bộ phát và mắt thu. Giữ nguyên ID lệnh nếu muốn giữ nút và automation hiện có; có thể thêm lệnh mới vào commands." : "Lưu sẽ cập nhật đúng profile trong thư viện. Các thiết bị đã tạo giữ bản sao riêng; hãy sửa JSON trong phần quản lý thiết bị để cập nhật chúng."}</p>
+        <label>Nạp file đã sửa <input data-json-file type="file" accept=".json,application/json" ${d.saving || d.loading ? "disabled" : ""}></label>
+        <textarea data-json-text spellcheck="false" style="width:100%;height:45vh;font-family:monospace;box-sizing:border-box" ${d.saving || d.loading ? "disabled" : ""}>${this.esc(d.text)}</textarea>
+        ${d.error ? `<div class="callout error-callout">${this.esc(d.error)}</div>` : ""}
+        <div class="learn-actions">
+          <button data-json-cancel ${d.saving || d.loading ? "disabled" : ""}>Đóng</button>
+          <button data-json-download ${d.saving || d.loading ? "disabled" : ""}>Tải JSON đang sửa</button>
+          <button class="primary" data-json-save ${d.saving || d.loading ? "disabled" : ""}>${d.loading ? "Đang đọc file…" : d.saving ? "Đang lưu…" : "Lưu thay thế"}</button>
+        </div>
+      </div></div></div>`;
   }
 
   renderCustomAddModal(state) {
@@ -1797,6 +1817,13 @@ class HanjooIrPanel extends HTMLElement {
       if (profile) { this._detail = { mode: "profile-test", profile }; this.render(); }
     }));
     qa("[data-delete-profile]").forEach(el => el.addEventListener("click", () => this.deleteProfile(el.dataset.deleteProfile)));
+    qa("[data-edit-json-profile]").forEach(el => el.addEventListener("click", () => this.openJsonEditor("profile", el.dataset.editJsonProfile)));
+    q("[data-edit-json-device]")?.addEventListener("click", () => this.openJsonEditor("device", this._detail.device.id));
+    q("[data-json-text]")?.addEventListener("input", e => { if (this._jsonEditor) this._jsonEditor.text = e.target.value; });
+    q("[data-json-file]")?.addEventListener("change", e => this.loadJsonEditorFile(e));
+    q("[data-json-cancel]")?.addEventListener("click", () => { this._jsonEditor = null; this.render(); });
+    q("[data-json-download]")?.addEventListener("click", () => this.downloadText("hanjoo-edited.json", this._jsonEditor.text));
+    q("[data-json-save]")?.addEventListener("click", () => this.saveJsonEditor());
     qa("[data-export-profile]").forEach(el => el.addEventListener("click", () => this.exportProfile(el.dataset.exportProfile)));
 
     qa("[data-close-modal]").forEach(el => el.addEventListener("click", e => {
@@ -2642,12 +2669,53 @@ class HanjooIrPanel extends HTMLElement {
     }
   }
 
+  async openJsonEditor(target, id) {
+    try {
+      const result = await this.ws(`${target}/export`, { [`${target}_id`]: id });
+      this._jsonEditor = { target, id, text: result.text, error: "", saving: false, loading: false };
+      this.render();
+    } catch (err) { this.toast(this.errText(err), true); }
+  }
+
+  async loadJsonEditorFile(e) {
+    const d = this._jsonEditor;
+    const file = e.target.files?.[0];
+    if (!d || d.saving || d.loading || !file) return;
+    d.loading = true;this.render();
+    try {
+      if (file.size > 16_000_000) throw new Error("File lớn hơn giới hạn 16 MB");
+      const text = await file.text();
+      if (this._jsonEditor !== d || d.saving) return;
+      d.text = text;d.error = "";
+    } catch (err) { if (this._jsonEditor === d) d.error = this.errText(err); }
+    d.loading = false;
+    if (this._jsonEditor === d) this.render();
+  }
+
+  async saveJsonEditor() {
+    const d = this._jsonEditor;
+    if (!d || d.saving || d.loading) return;
+    d.saving = true;d.error = "";this.render();
+    try {
+      await this.ws(`${d.target}/update_json`, { [`${d.target}_id`]: d.id, text: d.text });
+    } catch (err) {
+      d.saving = false;d.error = this.errText(err);this.render();return;
+    }
+    this._jsonEditor = null;
+    try {
+      await this.loadAll();
+      if (d.target === "device") await this.openDevice(d.id);
+      this.toast("Đã lưu và áp dụng JSON");
+    } catch (err) { this.toast(`Đã lưu JSON. ${this.errText(err)}`, true); }
+  }
+
   async importFile(e) {
     const files = [...(e.target.files || [])];
     if (!files.length) return;
     let imported = 0;
     let warnings = 0;
     let failed = 0;
+    const failures = [];
     try {
       for (let index = 0; index < files.length; index++) {
         const file = files[index];
@@ -2657,10 +2725,11 @@ class HanjooIrPanel extends HTMLElement {
           if (file.size > 16_000_000) throw new Error("File lớn hơn giới hạn 16 MB");
           const text = await file.text();
           const result = await this.ws("profile/import", { filename: file.name, text });
-          imported += result.count || 1;
+          imported += result.count ?? 1;
           warnings += result.warnings?.length || 0;
         } catch (err) {
           failed++;
+          failures.push(`${file.name}: ${this.errText(err)}`);
           console.warn("HanJoo IR import failed", file.name, err);
         }
       }
@@ -2669,7 +2738,7 @@ class HanjooIrPanel extends HTMLElement {
       const parts = [`${imported} profile`];
       if (warnings) parts.push(`${warnings} cảnh báo`);
       if (failed) parts.push(`${failed} file lỗi`);
-      this.toast(`Import xong: ${parts.join(" · ")}`, failed > 0 && imported === 0);
+      this.toast(`Import xong: ${parts.join(" · ")}${failures.length ? ` · ${failures.join("; ")}` : ""}`, failed > 0 && imported === 0);
     } finally {
       this._busyText = "";
       e.target.value = "";

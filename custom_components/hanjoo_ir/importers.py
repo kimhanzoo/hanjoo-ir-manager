@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from copy import deepcopy
 import json
+import math
 import re
 from typing import Any
 import uuid
@@ -520,6 +521,39 @@ def _convert_hair_wig(data: dict[str, Any]) -> ImportResult:
     return ImportResult(profile, fmt, warnings)
 
 
+def _json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ProfileImportError(f"Duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _json_constant(value):
+    raise ProfileImportError(f"Invalid JSON number: {value}")
+
+
+def _repeat_count(value):
+    value = 1 if value is None else value
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 100:
+        raise ProfileImportError("send_count must be an integer from 1 to 100")
+    return value
+
+
+def _profile_codes(item, label):
+    codes = item.get("codes", [])
+    if not isinstance(codes, list):
+        raise ProfileImportError(f"{label} codes must be a list")
+    result = []
+    for index, code in enumerate(codes):
+        try:
+            result.append(decode_external_code(code))
+        except (IRCodeError, ValueError, TypeError) as err:
+            raise ProfileImportError(f"{label} code {index}: {err}") from err
+    return result
+
+
 def _normalize_hanjoo_profile(profile: dict[str, Any]) -> dict[str, Any]:
     """Validate and normalize every IR payload in a portable HanJoo profile."""
     normalized = deepcopy(profile)
@@ -532,49 +566,81 @@ def _normalize_hanjoo_profile(profile: dict[str, Any]) -> dict[str, Any]:
     }:
         raise ProfileImportError("HanJoo profile has an unsupported device type")
 
+    if not isinstance(normalized.get("name", "IR profile"), str):
+        raise ProfileImportError("Profile name must be text")
+    for block in ("media_player", "fan", "protocol_engine"):
+        if normalized.get(block) is not None and not isinstance(normalized[block], dict):
+            raise ProfileImportError(f"{block} must be an object")
+    for block, fields in (("media_player", ("sources",)), ("fan", ("speed_modes",))):
+        for field in fields:
+            value = (normalized.get(block) or {}).get(field)
+            if normalized.get(block) is not None and field in normalized[block] and value is None:
+                normalized[block][field] = []
+            if value is not None and (not isinstance(value, list) or not all(isinstance(x, str) for x in value)):
+                raise ProfileImportError(f"{block}.{field} must be a list of text values")
+
     commands = normalized.setdefault("commands", {})
     if not isinstance(commands, dict):
         raise ProfileImportError("HanJoo commands must be an object")
     for command_id, item in commands.items():
         if not isinstance(item, dict):
             raise ProfileImportError(f"Command {command_id!r} is invalid")
-        raw_codes = item.get("codes") or []
-        if not isinstance(raw_codes, list):
-            raise ProfileImportError(f"Command {command_id!r} codes must be a list")
-        codes = []
-        for index, raw in enumerate(raw_codes):
-            try:
-                codes.append(decode_external_code(raw))
-            except IRCodeError as err:
-                raise ProfileImportError(
-                    f"Command {command_id!r} code {index}: {err}"
-                ) from err
-        item["codes"] = codes
-        item["send_count"] = max(1, int(item.get("send_count") or 1))
+        item["codes"] = _profile_codes(item, f"Command {command_id!r}")
+        item["send_count"] = _repeat_count(item.get("send_count"))
         item["name"] = str(item.get("name") or command_id)
 
     climate = normalized.get("climate")
     if climate is not None:
         if not isinstance(climate, dict):
             raise ProfileImportError("HanJoo climate block must be an object")
+        for field in ("modes", "fan_modes", "swing_modes", "swing_horizontal_modes", "preset_modes"):
+            value = climate.get(field)
+            if value is not None and (not isinstance(value, list) or not all(isinstance(x, str) for x in value)):
+                raise ProfileImportError(f"Climate {field} must be a list of text values")
+        for field in ("min_temp", "max_temp", "precision", "default_temp"):
+            if field in climate:
+                value = climate[field]
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                    raise ProfileImportError(f"Climate {field} must be a finite number")
+        if climate.get("precision", 1) <= 0 or climate.get("min_temp", 16) > climate.get("max_temp", 30):
+            raise ProfileImportError("Climate temperature range or precision is invalid")
         for key in ("off", "on"):
             item = climate.get(key)
             if item is None:
                 continue
             if not isinstance(item, dict):
                 raise ProfileImportError(f"Climate {key} frame is invalid")
-            item["codes"] = [decode_external_code(code) for code in (item.get("codes") or [])]
-            item["send_count"] = max(1, int(item.get("send_count") or 1))
+            item["codes"] = _profile_codes(item, f"Climate {key}")
+            item["send_count"] = _repeat_count(item.get("send_count"))
         cells = climate.setdefault("cells", [])
         if not isinstance(cells, list):
             raise ProfileImportError("Climate cells must be a list")
+        seen_cells = set()
         for index, cell in enumerate(cells):
             if not isinstance(cell, dict):
                 raise ProfileImportError(f"Climate cell {index} is invalid")
-            cell["codes"] = [decode_external_code(code) for code in (cell.get("codes") or [])]
+            if not isinstance(cell.get("mode"), str) or not cell["mode"]:
+                raise ProfileImportError(f"Climate cell {index} requires mode")
+            temp = cell.get("temp")
+            if temp is not None and (isinstance(temp, bool) or not isinstance(temp, (int, float)) or not math.isfinite(temp)):
+                raise ProfileImportError(f"Climate cell {index} temperature must be a finite number")
+            for field in ("fan", "swing", "swing_horizontal", "preset"):
+                if cell.get(field) is not None and not isinstance(cell[field], str):
+                    raise ProfileImportError(f"Climate cell {index} {field} must be text")
+            cell["codes"] = _profile_codes(cell, f"Climate cell {index}")
             if not cell["codes"]:
                 raise ProfileImportError(f"Climate cell {index} has no IR code")
-            cell["send_count"] = max(1, int(cell.get("send_count") or 1))
+            cell["send_count"] = _repeat_count(cell.get("send_count"))
+            identity = tuple(cell.get(field) for field in ("mode", "temp", "fan", "swing", "swing_horizontal", "preset"))
+            if identity in seen_cells:
+                raise ProfileImportError(f"Climate cell {index} duplicates a state")
+            seen_cells.add(identity)
+            for field, option in (("modes", "mode"), ("fan_modes", "fan"), ("swing_modes", "swing"), ("swing_horizontal_modes", "swing_horizontal"), ("preset_modes", "preset")):
+                value = cell.get(option)
+                options = climate.get(field) or []
+                climate[field] = options
+                if value and value not in options:
+                    options.append(value)
     return normalized
 
 
@@ -625,7 +691,7 @@ def import_profile_text(text: str, filename: str = "") -> ImportResult:
     if len(text.encode("utf-8", errors="ignore")) > MAX_IMPORT_BYTES:
         raise ProfileImportError("Profile file is too large")
     try:
-        data = json.loads(text)
+        data = json.loads(text, object_pairs_hook=_json_object, parse_constant=_json_constant)
     except json.JSONDecodeError as err:
         raise ProfileImportError(f"Invalid JSON: {err.msg}") from err
     if not isinstance(data, dict):
@@ -660,13 +726,13 @@ def import_profiles_text(text: str, filename: str = "") -> list[ImportResult]:
     if len(text.encode("utf-8", errors="ignore")) > MAX_IMPORT_BYTES:
         raise ProfileImportError("Profile/library file is too large")
     try:
-        data = json.loads(text)
+        data = json.loads(text, object_pairs_hook=_json_object, parse_constant=_json_constant)
     except json.JSONDecodeError as err:
         raise ProfileImportError(f"Invalid JSON: {err.msg}") from err
 
     if isinstance(data, dict) and data.get("format") == "hanjoo-ir-library/1":
         rows = data.get("profiles")
-        if not isinstance(rows, list) or not rows:
+        if not isinstance(rows, list):
             raise ProfileImportError("HanJoo library has no profiles")
         if len(rows) > 5000:
             raise ProfileImportError("HanJoo library contains too many profiles")

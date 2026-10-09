@@ -40,6 +40,7 @@ from .importers import (
     export_hanjoo_library,
     export_hanjoo_profile,
     import_profiles_text,
+    import_profile_text,
     profile_summary,
 )
 from .ir_code import code_from_timings, command_from_code
@@ -90,6 +91,7 @@ class HanJooIRManager:
         self._listeners: set[Callable[[], None]] = set()
         self._learn_lock = asyncio.Lock()
         self._capture_save_lock = asyncio.Lock()
+        self._json_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
         self._pending_captures: dict[str, dict[str, Any]] = {}
         self._active_capture_futures: dict[
@@ -871,61 +873,66 @@ class HanJooIRManager:
         return device_id
 
     async def delete_device(self, device_id: str) -> None:
-        self.get_devices().pop(device_id, None)
-        # Remove the HA device-registry node too; core removes its attached
-        # entity-registry rows. This prevents deleted dynamic buttons/entities
-        # from lingering as stale entities after the integration reloads.
-        registry = dr.async_get(self.hass)
-        ha_device = registry.async_get_device(identifiers={(DOMAIN, device_id)})
-        if ha_device is not None:
-            registry.async_remove_device(ha_device.id)
-        await self.async_save()
+        async with self._capture_save_lock:
+            self.get_devices().pop(device_id, None)
+            # Remove the HA device-registry node too; core removes its attached
+            # entity-registry rows. This prevents deleted dynamic buttons/entities
+            # from lingering as stale entities after the integration reloads.
+            registry = dr.async_get(self.hass)
+            ha_device = registry.async_get_device(identifiers={(DOMAIN, device_id)})
+            if ha_device is not None:
+                registry.async_remove_device(ha_device.id)
+            await self.async_save()
 
     async def update_routing(
         self, device_id: str, emitters: list[str], receiver: str | None
     ) -> None:
-        device = self._require_device(device_id)
-        device["emitter_entity_ids"] = list(dict.fromkeys(emitters))
-        device["receiver_entity_id"] = receiver
-        await self.async_save()
+        async with self._capture_save_lock:
+            device = self._require_device(device_id)
+            device["emitter_entity_ids"] = list(dict.fromkeys(emitters))
+            device["receiver_entity_id"] = receiver
+            await self.async_save()
 
     async def add_custom_command(self, device_id: str, name: str) -> str:
-        device = self._require_device(device_id)
-        base = _slug(name)
-        command_id = base
-        suffix = 2
-        while command_id in device["commands"]:
-            command_id = f"{base}_{suffix}"
-            suffix += 1
-        device["commands"][command_id] = {
-            "name": name.strip() or command_id,
-            "codes": [],
-            "send_count": 1,
-        }
-        await self.async_save()
-        return command_id
+        async with self._capture_save_lock:
+            device = self._require_device(device_id)
+            base = _slug(name)
+            command_id = base
+            suffix = 2
+            while command_id in device["commands"]:
+                command_id = f"{base}_{suffix}"
+                suffix += 1
+            device["commands"][command_id] = {
+                "name": name.strip() or command_id,
+                "codes": [],
+                "send_count": 1,
+            }
+            await self.async_save()
+            return command_id
 
     async def delete_command(self, device_id: str, command_id: str) -> None:
-        device = self._require_device(device_id)
-        device.get("commands", {}).pop(command_id, None)
-        # Remove the corresponding entity-registry row so a deleted custom/
-        # fallback button does not linger as a permanently unavailable ghost.
-        registry = er.async_get(self.hass)
-        unique_id = f"{self.entry_id}_{device_id}_button_{command_id}"
-        for entry in er.async_entries_for_config_entry(registry, self.entry_id):
-            if entry.unique_id == unique_id:
-                registry.async_remove(entry.entity_id)
-                break
-        await self.async_save()
+        async with self._capture_save_lock:
+            device = self._require_device(device_id)
+            device.get("commands", {}).pop(command_id, None)
+            # Remove the corresponding entity-registry row so a deleted custom/
+            # fallback button does not linger as a permanently unavailable ghost.
+            registry = er.async_get(self.hass)
+            unique_id = f"{self.entry_id}_{device_id}_button_{command_id}"
+            for entry in er.async_entries_for_config_entry(registry, self.entry_id):
+                if entry.unique_id == unique_id:
+                    registry.async_remove(entry.entity_id)
+                    break
+            await self.async_save()
 
     async def clear_command(self, device_id: str, command_id: str) -> None:
-        device = self._require_device(device_id)
-        item = device.get("commands", {}).get(command_id)
-        if not item:
-            raise HomeAssistantError("Không tìm thấy lệnh")
-        item["codes"] = []
+        async with self._capture_save_lock:
+            device = self._require_device(device_id)
+            item = device.get("commands", {}).get(command_id)
+            if not item:
+                raise HomeAssistantError("Không tìm thấy lệnh")
+            item["codes"] = []
 
-        await self.async_save()
+            await self.async_save()
 
     @staticmethod
     def _capture_quality(timings: list[int]) -> tuple[str, str | None]:
@@ -1519,30 +1526,88 @@ class HanJooIRManager:
 
     async def store_import_result(self, result: ImportResult) -> str:
         """Persist one already-normalized profile result."""
-        profile = result.profile
-        profile_id = str(profile["id"])
-        self.get_profiles()[profile_id] = profile
-        await self.async_save()
-        return profile_id
+        await self._store_profiles([result])
+        return str(result.profile["id"])
+
+    async def _store_profiles(self, results: list[ImportResult]) -> None:
+        async with self._json_lock:
+            previous = dict(self.get_profiles())
+            for result in results:
+                self.get_profiles()[str(result.profile["id"])] = result.profile
+            try:
+                await self.async_save()
+            except BaseException:
+                self.get_profiles().clear()
+                self.get_profiles().update(previous)
+                raise
 
     async def import_profiles(self, text: str, filename: str = "") -> list[ImportResult]:
         results = import_profiles_text(text, filename)
-        for result in results:
-            profile = result.profile
-            self.get_profiles()[str(profile["id"])] = profile
-        await self.async_save()
+        await self._store_profiles(results)
         return results
 
     async def import_profile(self, text: str, filename: str = "") -> ImportResult:
-        """Backward-compatible single-profile helper used by tests/services."""
-        results = await self.import_profiles(text, filename)
+        results = import_profiles_text(text, filename)
         if len(results) != 1:
             raise HomeAssistantError("File chứa nhiều profile; hãy dùng import_profiles")
+        await self._store_profiles(results)
         return results[0]
 
+    async def update_profile_json(self, profile_id: str, text: str) -> None:
+        result = import_profile_text(text)
+        async with self._json_lock:
+            previous = self.get_profile(profile_id)
+            if previous is None:
+                raise HomeAssistantError("Không tìm thấy profile")
+            result.profile["id"] = profile_id
+            self.get_profiles()[profile_id] = result.profile
+            try:
+                await self.async_save()
+            except BaseException:
+                self.get_profiles()[profile_id] = previous
+                raise
+
+    async def update_device_json(self, device_id: str, text: str) -> None:
+        result = import_profile_text(text)
+        async with self._json_lock, self._capture_save_lock, self._send_lock:
+            device = self._require_device(device_id)
+            if result.profile["type"] != device["type"]:
+                raise HomeAssistantError("Không thể đổi loại thiết bị bằng JSON. Hãy tạo thiết bị mới.")
+            previous = deepcopy(device)
+            replacement = deepcopy(result.profile)
+            for key in ("id", "emitter_entity_ids", "receiver_entity_id"):
+                replacement[key] = deepcopy(previous.get(key))
+            replacement["source"] = "user_json"
+            replacement["profile_id"] = None
+            for key in ("import_warnings", "import_filename"):
+                replacement.pop(key, None)
+            device.clear()
+            device.update(replacement)
+            try:
+                await self.async_save()
+            except BaseException:
+                device.clear()
+                device.update(previous)
+                raise
+            # Remove orphan buttons before reload; retained command IDs keep
+            # their existing entity registry IDs and automation references.
+            removed = set(previous.get("commands", {})) - set(device.get("commands", {}))
+            if removed:
+                registry = er.async_get(self.hass)
+                unique_ids = {f"{self.entry_id}_{device_id}_button_{command}" for command in removed}
+                for entry in er.async_entries_for_config_entry(registry, self.entry_id):
+                    if entry.unique_id in unique_ids:
+                        registry.async_remove(entry.entity_id)
+
     async def delete_profile(self, profile_id: str) -> None:
-        self.get_profiles().pop(profile_id, None)
-        await self.async_save()
+        async with self._json_lock:
+            previous = self.get_profiles().pop(profile_id, None)
+            try:
+                await self.async_save()
+            except BaseException:
+                if previous is not None:
+                    self.get_profiles()[profile_id] = previous
+                raise
 
     def export_device(self, device_id: str) -> str:
         """Export a runtime device as a portable HanJoo profile."""

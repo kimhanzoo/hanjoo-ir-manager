@@ -100,6 +100,7 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
         ws_device_delete_command,
         ws_device_clear_command,
         ws_device_capture,
+        ws_device_test_capture,
         ws_device_save_capture,
         ws_device_discard_capture,
         ws_device_learn,
@@ -1744,8 +1745,10 @@ async def ws_device_create_from_protocol(hass, connection, msg) -> None:
             emitters=msg["emitters"],
             receiver=msg.get("receiver"),
         )
+        # Finish entity setup before the client can start a new capture.
+        if not await hass.config_entries.async_reload(entry_id):
+            raise HomeAssistantError("Đã lưu thiết bị nhưng chưa tải lại được HanJoo IR. Hãy tải lại tích hợp.")
         connection.send_result(msg["id"], {"device_id": device_id})
-        _reload_soon(hass, entry_id)
     except Exception as err:
         _error(connection, msg, err)
 
@@ -1993,8 +1996,10 @@ async def ws_device_create_custom(hass, connection, msg) -> None:
             emitters=msg["emitters"],
             receiver=msg.get("receiver"),
         )
+        # Finish entity setup before the client can start a new capture.
+        if not await hass.config_entries.async_reload(entry_id):
+            raise HomeAssistantError("Đã lưu thiết bị nhưng chưa tải lại được HanJoo IR. Hãy tải lại tích hợp.")
         connection.send_result(msg["id"], {"device_id": device_id})
-        _reload_soon(hass, entry_id)
     except Exception as err:
         _error(connection, msg, err)
 
@@ -2029,8 +2034,10 @@ async def ws_device_create_from_captures(hass, connection, msg) -> None:
             emitters=msg["emitters"],
             receiver=msg.get("receiver"),
         )
+        # Finish entity setup before the client can start a new capture.
+        if not await hass.config_entries.async_reload(entry_id):
+            raise HomeAssistantError("Đã lưu thiết bị nhưng chưa tải lại được HanJoo IR. Hãy tải lại tích hợp.")
         connection.send_result(msg["id"], {"device_id": device_id})
-        _reload_soon(hass, entry_id)
     except Exception as err:
         _error(connection, msg, err)
 
@@ -2061,8 +2068,10 @@ async def ws_device_create_from_profile(hass, connection, msg) -> None:
             receiver=msg.get("receiver"),
             protocol_hint=msg.get("protocol_hint"),
         )
+        # Finish entity setup before the client can start a new capture.
+        if not await hass.config_entries.async_reload(entry_id):
+            raise HomeAssistantError("Đã lưu thiết bị nhưng chưa tải lại được HanJoo IR. Hãy tải lại tích hợp.")
         connection.send_result(msg["id"], {"device_id": device_id})
-        _reload_soon(hass, entry_id)
     except Exception as err:
         _error(connection, msg, err)
 
@@ -2214,6 +2223,28 @@ async def ws_device_capture(hass, connection, msg) -> None:
             msg["device_id"], int(msg["timeout"])
         )
         connection.send_result(msg["id"], result)
+    except Exception as err:
+        _error(connection, msg, err)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{WS_PREFIX}/device/test_capture",
+        vol.Required("device_id"): str,
+        vol.Required("token"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_device_test_capture(hass, connection, msg) -> None:
+    runtime = _runtime(hass)
+    if runtime is None:
+        connection.send_error(msg["id"], "not_configured", "HanJoo IR chưa được cấu hình")
+        return
+    manager, _entry_id = runtime
+    try:
+        await manager.test_captured_command(msg["device_id"], msg["token"])
+        connection.send_result(msg["id"], {"ok": True})
     except Exception as err:
         _error(connection, msg, err)
 

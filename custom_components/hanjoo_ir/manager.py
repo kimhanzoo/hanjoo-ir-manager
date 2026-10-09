@@ -89,6 +89,8 @@ class HanJooIRManager:
         }
         self._listeners: set[Callable[[], None]] = set()
         self._learn_lock = asyncio.Lock()
+        self._capture_save_lock = asyncio.Lock()
+        self._send_lock = asyncio.Lock()
         self._pending_captures: dict[str, dict[str, Any]] = {}
         self._active_capture_futures: dict[
             str, asyncio.Future[InfraredReceivedSignal]
@@ -227,6 +229,8 @@ class HanJooIRManager:
     async def async_stop_receiver_monitoring(self) -> None:
         """Remove all continuous receiver subscriptions."""
         self._receiver_monitor_started = False
+        for device_id in list(self._active_capture_futures):
+            self.cancel_capture_wait(device_id)
         for device_id in self._rx_decode_tokens:
             self._rx_decode_tokens[device_id] += 1
         for unsubscribe in list(self._receiver_unsubs.values()):
@@ -1016,6 +1020,13 @@ class HanJooIRManager:
         )
         timings = code.get("timings") or []
         quality, quality_message = self._capture_quality(timings)
+        if quality != "invalid" and getattr(signal, "inferred_gaps", 0):
+            quality = "warning"
+            quality_message = (
+                "Mắt thu chia lệnh thành nhiều đoạn và không cung cấp khoảng nghỉ giữa đoạn. "
+                "Khoảng nghỉ 10 ms đang được ước lượng; hãy phát thử trước khi lưu. "
+                "Nếu thiết bị không phản hồi, cần chỉnh idle của mắt thu để nhận trọn lệnh."
+            )
 
         loop = asyncio.get_running_loop()
         now = loop.time()
@@ -1042,10 +1053,12 @@ class HanJooIRManager:
             "quality": quality,
             "quality_message": quality_message,
             "can_save": quality != "invalid",
+            "frequency_assumed": bool(getattr(signal, "frequency_assumed", not getattr(signal, "modulation", None))),
+            "inferred_gaps": int(getattr(signal, "inferred_gaps", 0)),
         }
 
-    def _consume_capture(self, token: str, device_id: str) -> dict[str, Any]:
-        pending = self._pending_captures.pop(token, None)
+    def _get_capture(self, token: str, device_id: str) -> dict[str, Any]:
+        pending = self._pending_captures.get(token)
         if not pending:
             raise HomeAssistantError(
                 "Mã IR tạm đã hết hạn hoặc không còn tồn tại. Hãy học lại."
@@ -1067,16 +1080,31 @@ class HanJooIRManager:
     def discard_capture(self, token: str) -> None:
         self._pending_captures.pop(token, None)
 
+    async def test_captured_command(self, device_id: str, token: str) -> None:
+        """Replay the full pending capture without replacing an existing command."""
+        device = self._require_device(device_id)
+        code = self._get_capture(token, device_id)
+        await self._send_item(device, {"codes": [code], "send_count": 1})
+
     async def save_captured_command(
         self, device_id: str, command_id: str, token: str
     ) -> None:
-        device = self._require_device(device_id)
-        item = device.get("commands", {}).get(command_id)
-        if not item:
-            raise HomeAssistantError("Không tìm thấy nút cần lưu")
-        item["codes"] = [self._consume_capture(token, device_id)]
-        item["send_count"] = 1
-        await self.async_save()
+        async with self._capture_save_lock:
+            device = self._require_device(device_id)
+            item = device.get("commands", {}).get(command_id)
+            if not item:
+                raise HomeAssistantError("Không tìm thấy nút cần lưu")
+            code = self._get_capture(token, device_id)
+            previous = deepcopy(item)
+            item["codes"] = [code]
+            item["send_count"] = 1
+            try:
+                await self.async_save()
+            except BaseException:
+                item.clear()
+                item.update(previous)
+                raise
+            self.discard_capture(token)
 
     async def save_captured_climate_state(
         self,
@@ -1091,47 +1119,57 @@ class HanJooIRManager:
         preset: str | None = None,
         power: str = "state",
     ) -> None:
-        device = self._require_device(device_id)
-        if device.get("type") != DEVICE_TYPE_CLIMATE:
-            raise HomeAssistantError("Thiết bị này không phải climate")
-        climate = device.setdefault("climate", {})
-        learned = {
-            "codes": [self._consume_capture(token, device_id)],
-            "send_count": 1,
-        }
-        if power == "off":
-            climate["off"] = learned
-        elif power == "on":
-            climate["on"] = learned
-        else:
-            cell = {
-                "mode": str(mode),
-                "temp": None if temp is None else float(temp),
-                "fan": fan or None,
-                "swing": swing or None,
-                "swing_horizontal": swing_horizontal or None,
-                "preset": preset or None,
-                "extras": [],
-                **learned,
+        async with self._capture_save_lock:
+            device = self._require_device(device_id)
+            if device.get("type") != DEVICE_TYPE_CLIMATE:
+                raise HomeAssistantError("Thiết bị này không phải climate")
+            previous = deepcopy(device.get("climate"))
+            climate = device.setdefault("climate", {})
+            learned = {
+                "codes": [self._get_capture(token, device_id)],
+                "send_count": 1,
             }
-            cells = climate.setdefault("cells", [])
-            key = self._climate_key(cell)
-            for idx, old in enumerate(cells):
-                if self._climate_key(old) == key:
-                    cells[idx] = cell
-                    break
+            if power == "off":
+                climate["off"] = learned
+            elif power == "on":
+                climate["on"] = learned
             else:
-                cells.append(cell)
-            self._extend_unique(climate.setdefault("modes", []), str(mode))
-            if fan:
-                self._extend_unique(climate.setdefault("fan_modes", []), fan)
-            if swing:
-                self._extend_unique(climate.setdefault("swing_modes", []), swing)
-            if swing_horizontal:
-                self._extend_unique(climate.setdefault("swing_horizontal_modes", []), swing_horizontal)
-            if preset:
-                self._extend_unique(climate.setdefault("preset_modes", []), preset)
-        await self.async_save()
+                cell = {
+                    "mode": str(mode),
+                    "temp": None if temp is None else float(temp),
+                    "fan": fan or None,
+                    "swing": swing or None,
+                    "swing_horizontal": swing_horizontal or None,
+                    "preset": preset or None,
+                    "extras": [],
+                    **learned,
+                }
+                cells = climate.setdefault("cells", [])
+                key = self._climate_key(cell)
+                for idx, old in enumerate(cells):
+                    if self._climate_key(old) == key:
+                        cells[idx] = cell
+                        break
+                else:
+                    cells.append(cell)
+                self._extend_unique(climate.setdefault("modes", []), str(mode))
+                if fan:
+                    self._extend_unique(climate.setdefault("fan_modes", []), fan)
+                if swing:
+                    self._extend_unique(climate.setdefault("swing_modes", []), swing)
+                if swing_horizontal:
+                    self._extend_unique(climate.setdefault("swing_horizontal_modes", []), swing_horizontal)
+                if preset:
+                    self._extend_unique(climate.setdefault("preset_modes", []), preset)
+            try:
+                await self.async_save()
+            except BaseException:
+                if previous is None:
+                    device.pop("climate", None)
+                else:
+                    device["climate"] = previous
+                raise
+            self.discard_capture(token)
 
     async def learn_command(
         self,
@@ -1189,8 +1227,8 @@ class HanJooIRManager:
         bursts as 25 C / 26 C / OFF samples.
 
         We now keep the receiver armed until it has been quiet for a short guard
-        interval. Every event belonging to that press is concatenated, preserving
-        the inter-frame space, and returned as one logical sample. Holding a key
+        interval. Events in that window are concatenated, preserving spaces when
+        supplied by the receiver and flagging estimated missing gaps. Holding a key
         keeps extending the quiet timer, so the next wizard step cannot steal a
         repeat from the same press.
         """
@@ -1218,6 +1256,7 @@ class HanJooIRManager:
                 if future.done() or not frames:
                     return
                 merged: list[int] = []
+                inferred_gaps = 0
                 for frame in frames:
                     if not frame:
                         continue
@@ -1226,6 +1265,7 @@ class HanJooIRManager:
                     # inter-frame idle gap instead of creating two adjacent marks.
                     if merged and merged[-1] > 0 and frame[0] > 0:
                         merged.append(-10_000)
+                        inferred_gaps += 1
                     merged.extend(frame)
                 modulation = modulations[0] if modulations else DEFAULT_FREQUENCY
                 future.set_result(
@@ -1233,6 +1273,8 @@ class HanJooIRManager:
                         timings=merged,
                         modulation=modulation,
                         frame_count=len(frames),
+                        inferred_gaps=inferred_gaps,
+                        frequency_assumed=not bool(modulations),
                     )
                 )
 
@@ -1255,11 +1297,9 @@ class HanJooIRManager:
                     quiet_handle.cancel()
                 quiet_handle = loop.call_later(quiet_window, finish_press)
 
+            unsubscribe = None
             try:
                 unsubscribe = async_subscribe_receiver(self.hass, receiver, got_signal)
-            except HomeAssistantError:
-                raise
-            try:
                 return await asyncio.wait_for(future, timeout=timeout)
             except TimeoutError as err:
                 raise HomeAssistantError(
@@ -1268,7 +1308,10 @@ class HanJooIRManager:
             finally:
                 if quiet_handle is not None:
                     quiet_handle.cancel()
-                unsubscribe()
+                if unsubscribe is not None:
+                    unsubscribe()
+                if not future.done():
+                    future.cancel()
                 self._learning_receivers.discard(str(receiver))
                 if device_id and self._active_capture_futures.get(device_id) is future:
                     self._active_capture_futures.pop(device_id, None)
@@ -1289,38 +1332,40 @@ class HanJooIRManager:
         *,
         repeat_override: int | None = None,
     ) -> None:
-        if not item or not item.get("codes"):
-            raise HomeAssistantError("Lệnh/trạng thái này chưa có mã IR")
-        emitters = list(device.get("emitter_entity_ids") or [])
-        if not emitters:
-            raise HomeAssistantError("Thiết bị chưa chọn IR Transmitter")
-        for device_id, configured in self.get_devices().items():
-            if configured is device:
-                self._rx_decode_tokens[device_id] = self._rx_decode_tokens.get(device_id, 0) + 1
-        send_count = (
-            max(1, int(repeat_override))
-            if repeat_override is not None
-            else max(1, int(item.get("send_count") or 1))
-        )
-        # IR receivers commonly hear reflections from the local transmitter.
-        # Ignore a short window so a command sent by HanJoo is not mistaken for
-        # a physical-remote state update (especially dangerous for toggles).
-        suppress_until = time.monotonic() + 0.65
-        for receiver in {
-            str(d.get("receiver_entity_id"))
-            for d in self.get_devices().values()
-            if d.get("receiver_entity_id")
-        }:
-            self._suppress_receivers_until[receiver] = suppress_until
+        async with self._send_lock:
+            if not item or not item.get("codes"):
+                raise HomeAssistantError("Lệnh/trạng thái này chưa có mã IR")
+            emitters = list(device.get("emitter_entity_ids") or [])
+            if not emitters:
+                raise HomeAssistantError("Thiết bị chưa chọn IR Transmitter")
+            commands = [command_from_code(code) for code in item["codes"]]
+            for device_id, configured in self.get_devices().items():
+                if configured is device:
+                    self._rx_decode_tokens[device_id] = self._rx_decode_tokens.get(device_id, 0) + 1
+            send_count = (
+                max(1, int(repeat_override))
+                if repeat_override is not None
+                else max(1, int(item.get("send_count") or 1))
+            )
+            # IR receivers commonly hear reflections from the local transmitter.
+            # Ignore a short window so a command sent by HanJoo is not mistaken for
+            # a physical-remote state update (especially dangerous for toggles).
+            suppress_until = time.monotonic() + 0.65
+            for receiver in {
+                str(d.get("receiver_entity_id"))
+                for d in self.get_devices().values()
+                if d.get("receiver_entity_id")
+            }:
+                self._suppress_receivers_until[receiver] = suppress_until
 
-        for emitter in emitters:
-            for iteration in range(send_count):
-                for code_index, code in enumerate(item["codes"]):
-                    await async_send_command(self.hass, emitter, command_from_code(code))
-                    if code_index + 1 < len(item["codes"]):
-                        await asyncio.sleep(0.04)
-                if iteration + 1 < send_count:
-                    await asyncio.sleep(0.08)
+            for emitter in emitters:
+                for iteration in range(send_count):
+                    for code_index, command in enumerate(commands):
+                        await async_send_command(self.hass, emitter, command)
+                        if code_index + 1 < len(commands):
+                            await asyncio.sleep(0.04)
+                    if iteration + 1 < send_count:
+                        await asyncio.sleep(0.08)
 
     async def send_climate_power(self, device_id: str, on: bool) -> bool:
         """Send a dedicated or dynamically-generated climate on/off frame."""

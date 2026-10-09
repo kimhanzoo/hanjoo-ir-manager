@@ -64,6 +64,10 @@ class HanJooRemote(HanJooEntity, RemoteEntity):
                 command_id = await self.manager.add_custom_command(
                     self.device_id, command_id
                 )
+                runtime = self.hass.data.get(DOMAIN, {}).get(self.manager.entry_id, {})
+                add_button = runtime.get("add_command_button")
+                if callable(add_button):
+                    add_button(self.device_id, command_id)
             await self.manager.learn_command(self.device_id, command_id, timeout)
 
     async def async_delete_command(self, **kwargs: Any) -> None:

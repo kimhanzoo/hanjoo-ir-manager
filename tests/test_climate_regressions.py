@@ -95,7 +95,7 @@ async def main():
     fresh=Entity(m,'d');fresh.async_get_last_state=expired
     before=len(scheduled);await fresh.async_added_to_hass();assert len(scheduled)==before
     # Learn keeps both horizontal swing states instead of replacing a cell.
-    m.data={'devices':{'d':m.device}};m._consume_capture=lambda *args:{'format':'raw','timings':[100,-100,100,-100]}
+    m.data={'devices':{'d':m.device}};m._capture_save_lock=asyncio.Lock();m._pending_captures={};m._get_capture=lambda *args:{'format':'raw','timings':[100,-100,100,-100]}
     async def save():pass
     m.async_save=save
     for horizontal in ('left','right'):

@@ -1464,20 +1464,22 @@ class HanjooIrPanel extends HTMLElement {
         ${isPreview ? `
           <div class="learn-body">
             <div class="${d.capture.can_save === false ? "capture-bad" : d.capture.quality === "warning" ? "capture-warn" : "capture-ok"}">
-              ${d.capture.can_save === false ? "⚠ Tín hiệu chưa hợp lệ" : d.capture.quality === "warning" ? "⚠ Đã nhận tín hiệu, nhưng frame khá ngắn" : "✓ Đã nhận được tín hiệu"}
+              ${d.capture.can_save === false ? "⚠ Tín hiệu chưa hợp lệ" : d.capture.quality === "warning" ? "⚠ Đã nhận tín hiệu; cần phát thử" : "✓ Đã nhận được tín hiệu"}
             </div>
+            ${d.error ? `<div class="callout error-callout">${this.esc(d.error)}</div>` : ""}
             ${d.capture.quality_message ? `<div class="callout ${d.capture.can_save === false ? "error-callout" : ""}">${this.esc(d.capture.quality_message)}</div>` : ""}
             <div class="capture-grid">
-              <div><span>Tần số</span><b>${this.esc(d.capture.frequency)} Hz</b></div>
+              <div><span>Tần số${d.capture.frequency_assumed ? " (mặc định)" : ""}</span><b>${this.esc(d.capture.frequency)} Hz</b></div>
               <div><span>Số timing</span><b>${this.esc(d.capture.timing_count)}</b></div>
               <div><span>Độ dài frame</span><b>${this.esc(d.capture.duration_ms)} ms</b></div>
             </div>
             <label class="preview-label">Xem trước timing</label>
             <div class="timing-preview mono">${this.esc((d.capture.preview || []).join(", "))}${d.capture.truncated ? ", …" : ""}</div>
-            <p class="muted preview-note">Mã này <b>chưa được lưu</b>. Hãy lưu nếu đúng lần bấm vừa rồi, hoặc học lại nếu remote bị bấm nhầm/nhiễu.</p>
+            <p class="muted preview-note">Mã này <b>chưa được lưu</b>. Hãy phát thử và kiểm tra thiết bị phản hồi trước khi lưu. Thu được tín hiệu chưa đảm bảo điều khiển được; tần số có thể là giá trị mặc định 38 kHz khi mắt thu không đo được sóng mang.</p>
             <div class="learn-actions">
               <button data-retry-learn>↻ Học lại</button>
               <button data-cancel-learn>Hủy</button>
+              <button data-test-learn ${d.capture.can_save === false ? "disabled" : ""}>▶ Phát thử</button>
               <button class="primary" data-save-learn ${d.capture.can_save === false ? "disabled" : ""}>✓ Lưu mã này</button>
             </div>
           </div>` : ""}
@@ -1848,6 +1850,7 @@ class HanjooIrPanel extends HTMLElement {
 
     qa("[data-cancel-learn]").forEach(el => el.addEventListener("click", () => this.cancelLearn()));
     qa("[data-retry-learn]").forEach(el => el.addEventListener("click", () => this.retryLearn()));
+    qa("[data-test-learn]").forEach(el => el.addEventListener("click", () => this.testLearn(el)));
     qa("[data-save-learn]").forEach(el => el.addEventListener("click", () => this.saveLearn()));
 
     const deleteDevice = q("[data-delete-device]");
@@ -2442,8 +2445,10 @@ class HanjooIrPanel extends HTMLElement {
   }
 
   async beginCapture(payload) {
+    const session = {};
     this._learnDialog = {
       ...payload,
+      session,
       stage: "waiting",
       timeout: payload.timeout || 20,
       capture: null,
@@ -2455,7 +2460,7 @@ class HanjooIrPanel extends HTMLElement {
         device_id: payload.deviceId,
         timeout: payload.timeout || 20,
       });
-      if (!this._learnDialog) {
+      if (this._learnDialog?.session !== session) {
         if (capture?.token) {
           this.ws("device/discard_capture", { token: capture.token }).catch(() => {});
         }
@@ -2464,7 +2469,7 @@ class HanjooIrPanel extends HTMLElement {
       this._learnDialog = { ...this._learnDialog, stage: "preview", capture };
       this.render();
     } catch (err) {
-      if (!this._learnDialog) return;
+      if (this._learnDialog?.session !== session) return;
       this._learnDialog = {
         ...this._learnDialog,
         stage: "error",
@@ -2553,6 +2558,17 @@ class HanjooIrPanel extends HTMLElement {
     }
   }
 
+  async testLearn(button) {
+    const d = this._learnDialog;
+    if (d?.stage !== "preview" || !d.capture?.token || d.capture.can_save === false) return;
+    button.disabled = true;
+    try {
+      await this.ws("device/test_capture", { device_id: d.deviceId, token: d.capture.token });
+      this.toast("Đã gửi mã học tới bộ phát. Hãy kiểm tra thiết bị có phản hồi đúng không.");
+    } catch (err) { this.toast(this.errText(err), true); }
+    finally { button.disabled = false; }
+  }
+
   async saveLearn() {
     const d = this._learnDialog;
     if (!d?.capture?.token || d.capture.can_save === false) return;
@@ -2576,7 +2592,7 @@ class HanjooIrPanel extends HTMLElement {
     } catch (err) {
       this._learnDialog = {
         ...d,
-        stage: "error",
+        stage: "preview",
         error: this.errText(err),
       };
       this.render();
@@ -2586,7 +2602,7 @@ class HanjooIrPanel extends HTMLElement {
   async sendCommand(commandId) {
     try {
       await this.ws("device/send", { device_id: this._detail.device.id, command_id: commandId });
-      this.toast("Đã phát IR");
+      this.toast("Đã gửi lệnh IR tới bộ phát");
     } catch (err) { this.toast(this.errText(err), true); }
   }
 

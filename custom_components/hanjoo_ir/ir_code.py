@@ -59,6 +59,20 @@ def _normalize_signed(timings: list[int]) -> list[int]:
     if len(timings) > MAX_TIMINGS:
         raise IRCodeError(f"IR code has too many timings ({len(timings)})")
 
+    try:
+        timings = [int(raw) for raw in timings]
+    except (TypeError, ValueError) as err:
+        raise IRCodeError("IR timing is not an integer") from err
+    signed = any(value < 0 for value in timings)
+    if signed:
+        # Receiver-side idle before the first mark is not part of the command.
+        while timings and timings[0] < 0:
+            timings = timings[1:]
+        if not timings:
+            raise IRCodeError("IR code contains no mark")
+        if any((value > 0) != (idx % 2 == 0) for idx, value in enumerate(timings)):
+            raise IRCodeError("Signed IR timings must alternate mark and space")
+
     out: list[int] = []
     total = 0
     for idx, raw in enumerate(timings):
@@ -424,10 +438,11 @@ def xiaomi_raw_to_raw(code: str) -> tuple[list[int], int]:
 
 def code_from_timings(timings: list[int], frequency: int = DEFAULT_FREQUENCY) -> dict[str, Any]:
     """Create the canonical stored code object."""
+    command = RawIRCommand(timings, frequency=int(frequency or DEFAULT_FREQUENCY))
     return {
         "format": "raw",
-        "frequency": int(frequency or DEFAULT_FREQUENCY),
-        "timings": _normalize_signed(timings),
+        "frequency": int(command.modulation),
+        "timings": list(command._timings),
     }
 
 
